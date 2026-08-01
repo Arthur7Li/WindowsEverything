@@ -51,13 +51,29 @@ const float64_t SMALLOFFSET = 0.0000000000005;
 	3. There is a detacte the max code size,and computer memory size,limit number of submition,
 	 code type check. avoid large amount of memory swap, 
    */
+/**
+ * @brief Traverses the closed-stable Vary search tree and appends every requested code found in the move range.
+ * @param min Minimum half-move depth accepted by the closed-stable traversal.
+ * @param max Maximum half-move depth explored by the traversal.
+ * @param specMin Lower initial beam parameter used by descendant frames.
+ * @param specMax Upper initial beam parameter used by descendant frames.
+ * @param sideSum Mutable traversal accumulator owned by the caller for this invocation.
+ * @param billiard Initial billiard state copied into the root frame.
+ * @param code Mutable depth-first code buffer borrowed for the duration of the call.
+ * @param codesFound Caller-owned output collection receiving complete codes.
+ * @param reqType Requested code-type encoding copied into this call.
+ * @return Nothing; results are appended to @p codesFound.
+ * @throws std::runtime_error When traversal or code classification invariants fail.
+ * @invariant Cancellation is initialized once by the owning UI operation and remains latched for every queued native call.
+ * @note The function owns its worker pool and joins it before returning.
+ */
+// abdul 31/07/2026 [preserve the owning operation's cancel state instead of clearing it for each queued CS call]
 void iterateFireAwayCS2(
     int32_t min, int32_t max, float64_t specMin, float64_t specMax,
     SideSum& sideSum, TriangleBilliard billiard,
     std::vector<int32_t>& code,
     std::vector<std::vector<int32_t>>& codesFound, std::string reqType)
 {
-    cancel_flag().store(false,  std::memory_order_relaxed); 
     // store data in each level
     struct Frame {
         float64_t specMin;
@@ -103,7 +119,8 @@ void iterateFireAwayCS2(
             while (!stack.empty()) {
                 Frame& frame = stack.back();
 
-                if (cancel_flag().load(std::memory_order_relaxed)) {
+                // Observe the operation-level release store before scheduling another closed-stable branch.
+                if (cancel_flag().load(std::memory_order_acquire)) {
                     std::cout << "C++ VaryCS Canceling" << std::endl;
                     pool.stop();
                     pool.join();

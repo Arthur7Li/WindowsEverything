@@ -47,6 +47,8 @@ public final class VaryLTask extends Task<ObservableList<Storage>> implements Gr
     private final Array<Vector2> coordList;
     private final MutableSortedSet<String> coverCodes = new TreeSortedSet<>();
     private final BoyanMenu boyanMenu;
+    // abdul 28/07/2026 [store one immutable control snapshot for the complete recursive VaryL task]
+    private final VarySearchRequest searchRequest;
     private final ConnectionPool pool;
     private final int CSmax;
     private final int OSOmax;
@@ -69,7 +71,6 @@ public final class VaryLTask extends Task<ObservableList<Storage>> implements Gr
     private final int end;
     private final int codesFound;
     private volatile boolean gracefulCancelRequested = false;
-
     @Override
     public void requestGracefulCancel() {
         this.gracefulCancelRequested = true;
@@ -78,6 +79,7 @@ public final class VaryLTask extends Task<ObservableList<Storage>> implements Gr
     // Constructor takes a list of points to vary at
     public VaryLTask(
         final Array<Vector2> points, List<String> coverCodes, final BoyanMenu boyan,
+        final VarySearchRequest searchRequest,
         final Array<Integer> max, final ConnectionPool pool, final boolean override, final boolean draw,
         final Integer maxPrint, final ExecutorService eOne, final ExecutorService eTwo, final boolean printMid,
         final boolean firstLast, boolean addToAllPositive, boolean addToPlusMinus, IterateToLimitWindow iterateToLimitWindow,
@@ -85,6 +87,7 @@ public final class VaryLTask extends Task<ObservableList<Storage>> implements Gr
         this.coordList = points; // Points are in degrees
         this.coverCodes.addAll(coverCodes);
         this.boyanMenu = boyan;
+        this.searchRequest = searchRequest;
         this.CSmax = max.get(0);
         this.OSOmax = max.get(1);
         this.OSNOmax = max.get(2);
@@ -141,7 +144,11 @@ public final class VaryLTask extends Task<ObservableList<Storage>> implements Gr
         try {
             localCodes = autoCodesFiltered(coord, shotExecutor);
         } catch(RuntimeException e) {
-            if(this.gracefulCancelRequested || this.isCancelled() || Thread.interrupted()) {
+            // abdul 31/07/2026 [return retained VaryL partials when a queued native call observes cancellation]
+            if(e instanceof CancellationException
+                    || this.gracefulCancelRequested
+                    || this.isCancelled()
+                    || Thread.interrupted()) {
                 return this.partialResults.get();
             } else {
                 System.err.println("Terminating because of uncaught exception when finding codeSet");
@@ -328,7 +335,10 @@ public final class VaryLTask extends Task<ObservableList<Storage>> implements Gr
             future.cancel(true);
         } else {
             try {
-                future.get();
+                final Either<String, Storage> loaded = future.get();
+                if (loaded.isLeft() && !loaded.left().get().isEmpty()) {
+                    System.out.println(loaded.left().get());
+                }
             } catch (final ExecutionException e) {
                 // One of the futures threw an exception during its calculation,
                 // so return it to the caller; assigning an Optional parameter
@@ -349,7 +359,13 @@ public final class VaryLTask extends Task<ObservableList<Storage>> implements Gr
     private MutableSortedSet<ClassifiedCodeSequence> autoCodesFiltered(final Vector2 coords, final ExecutorService executor) {
         // autoVary requires coordinates to be in degree format
         final MutableSortedSet<ClassifiedCodeSequence> codes = new TreeSortedSet<>();
-        final MutableSortedSet<ClassifiedCodeSequence> boyanCodes = overrideSS ? boyanMenu.varyTrianglesL(coords, this.CSmaxSS, this.OSOmaxSS, this.OSNOmaxSS, executor) : boyanMenu.varyTrianglesL(coords, executor);
+        // abdul 27/07/2026 [use the immutable JavaFX-thread search snapshot throughout a recursive VaryL run]
+        final MutableSortedSet<ClassifiedCodeSequence> boyanCodes = overrideSS
+                ? boyanMenu.varyTrianglesL(
+                        coords, this.CSmaxSS, this.OSOmaxSS, this.OSNOmaxSS,
+                        searchRequest, executor)
+                : boyanMenu.varyTrianglesL(
+                        coords, searchRequest, executor);
         // Generate the filtered list
         for (ClassifiedCodeSequence code : boyanCodes) {
             if (code.codeType.equals(CodeType.OSO) && code.codeLength > OSOmax) {
@@ -380,22 +396,27 @@ public final class VaryLTask extends Task<ObservableList<Storage>> implements Gr
             System.out.println("//Cancel detected before loadStorage");
             return Either.left("");
         }
-        // Load from database if code already exists. If not, calculate
-        final Optional<Storage> opt = Database.loadStorage(classCodeSeq, this.pool);
+        // abdul 31/07/2026 [load every valid VaryL candidate and propagate an unexpected native MRR failure]
+        final Optional<Storage> loaded = Database.loadStorage(classCodeSeq, this.pool);
         // Check to see if cancel was called
         if(this.isCancelled() || Thread.interrupted()) {
             Thread.currentThread().interrupt();
             System.out.println("//Cancel detected after loadStorage");
             return Either.left("");
         }
-        if (opt.isPresent()) {
-            final Storage storage = opt.get();
-            // Update partialResults on the application thread in order to enforce thread safety
-            Platform.runLater(() -> this.partialResults.get().add(storage));
+        if (loaded.isPresent()) {
+            final Storage storage = loaded.get();
+            // abdul 28/07/2026 [prevent a queued VaryL partial from publishing after application-owned hard cancellation]
+            if (!this.isCancelled()) {
+                Platform.runLater(() -> {
+                    if (!this.isCancelled()) {
+                        this.partialResults.get().add(storage);
+                    }
+                });
+            }
             return Either.right(storage);
-        } else {
-            return Either.left("//empty set " + classCodeSeq);
         }
+        return Either.left("//empty set " + classCodeSeq);
     }
 
     // These expose partialResults to the FX application thread

@@ -32,6 +32,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Zhao Yu Li, Jun 06, 2025.
@@ -67,6 +68,7 @@ public class IterateToLimitWindow {
     private final Stage stage = new Stage();
 
     private final ConnectionPool pool;
+    private final OperationRegistry operations;
 
     // The IterateToLimitWindow uses this Observable Boolean Property to notify the Viewer when the iterate-to-limit
     // task is finished
@@ -81,8 +83,12 @@ public class IterateToLimitWindow {
 
     private CodeAndPatternLookupWindow codeAndPatternLookupWindow = null;
 
-    public IterateToLimitWindow(ConnectionPool pool) {
+    public IterateToLimitWindow(
+            final ConnectionPool pool,
+            final OperationRegistry operations) {
         this.pool = pool;
+        // abdul 27/07/2026 [pass the Viewer lifetime into the lookup child that performs asynchronous database reads]
+        this.operations = Objects.requireNonNull(operations, "operations");
 
         String fileContent = Utils.readFromFile(contentFileName);
         String[] contents = fileContent.split("-----");
@@ -179,7 +185,10 @@ public class IterateToLimitWindow {
 
         lookupButton.setText("Lookup");
         lookupButton.setOnAction(event -> {
-            if (codeAndPatternLookupWindow == null) codeAndPatternLookupWindow = new CodeAndPatternLookupWindow(this);
+            if (codeAndPatternLookupWindow == null) {
+                codeAndPatternLookupWindow =
+                        new CodeAndPatternLookupWindow(this, operations);
+            }
             codeAndPatternLookupWindow.show();
         });
 
@@ -542,37 +551,64 @@ public class IterateToLimitWindow {
 
         String[][] codePatterns = getPatterns();
 
-        ExecutorService executor = Executors.newFixedThreadPool(Utils.numThreads);
-        ArrayList<Tuple3<ArrayList<Storage>, ArrayList<ArrayList<Storage>>, ArrayList<ArrayList<Storage>>>> results = new ArrayList<>();
+        // abdul 28/07/2026 [observe or cancel every submitted Iterate future before synchronously joining its local pool]
+        final ExecutorService executor =
+                Executors.newFixedThreadPool(Utils.numThreads);
+        final ArrayList<Tuple3<ArrayList<Storage>, ArrayList<ArrayList<Storage>>, ArrayList<ArrayList<Storage>>>> results =
+                new ArrayList<>();
+        boolean allWorkObserved = false;
 
-        for (String[] codePattern : codePatterns) {
-            if (codePattern[0].isEmpty() && codePattern.length == 1) continue;
+        try {
+            for (String[] codePattern : codePatterns) {
+                if (codePattern[0].isEmpty() && codePattern.length == 1) {
+                    continue;
+                }
 
-            final MutableList<
-                    Future<
-                            Tuple3<ArrayList<Storage>, ArrayList<ArrayList<Storage>>, ArrayList<ArrayList<Storage>>>
-                            >
-                    > futures = new FastList<>();
+                final MutableList<
+                        Future<
+                                Tuple3<ArrayList<Storage>, ArrayList<ArrayList<Storage>>, ArrayList<ArrayList<Storage>>>
+                                >
+                        > futures = new FastList<>();
 
-            for (String pair : codePattern) {
-                futures.add(executor.submit(() -> iterateTask(pair, polygon, limit)));
-            }
+                for (String pair : codePattern) {
+                    futures.add(executor.submit(
+                            () -> iterateTask(pair, polygon, limit)));
+                }
 
-            for (int i = 0; i < futures.size(); i++) {
-                try {
-                    Tuple3<ArrayList<Storage>, ArrayList<ArrayList<Storage>>, ArrayList<ArrayList<Storage>>> result = futures.get(i).get();
-                    if (result != null) results.add(result);  // Only add results from tasks that ran to completion successfully
-                } catch (InterruptedException | ExecutionException e) {
-                    System.out.println("An exception occurred for the code sequence - iteration pattern pair '"
-                            + codePattern[i] + "':  " + e.getMessage());
+                for (int i = 0; i < futures.size(); i++) {
+                    try {
+                        final Tuple3<ArrayList<Storage>, ArrayList<ArrayList<Storage>>, ArrayList<ArrayList<Storage>>> result =
+                                futures.get(i).get();
+                        if (result != null) {
+                            results.add(result);
+                        }
+                    } catch (final InterruptedException exception) {
+                        Thread.currentThread().interrupt();
+                        Utils.cancelFutures(futures);
+                        this.results = null;
+                        return false;
+                    } catch (final ExecutionException exception) {
+                        System.out.println(
+                                "An exception occurred for the code sequence - iteration pattern pair '"
+                                        + codePattern[i] + "':  "
+                                        + exception.getMessage());
+                    }
                 }
             }
+            allWorkObserved = true;
+        } finally {
+            // abdul 28/07/2026 [guarantee the synchronous Iterate pool cannot survive interruption or an unchecked calculation exit]
+            if (allWorkObserved) {
+                executor.shutdown();
+            } else {
+                executor.shutdownNow();
+            }
+            Utils.safeShutdownExecutor(
+                    executor, 30, TimeUnit.SECONDS);
+            running = false;
         }
 
-        executor.shutdown();
-
         // We are done. Set the results, and notify the observer.
-        running = false;
         this.results = results;
         markFinishedIfPresent(this.finish);
 
@@ -635,6 +671,10 @@ public class IterateToLimitWindow {
         // so no finish observer necessarily exists during main-window shutdown.
         this.results = null;
         markFinishedIfPresent(this.finish);
+        // abdul 28/07/2026 [close the registry-owned lookup child before its result-sink parent disappears]
+        if (codeAndPatternLookupWindow != null) {
+            codeAndPatternLookupWindow.close();
+        }
         saveContentsToFile();
         this.stage.close();
     }

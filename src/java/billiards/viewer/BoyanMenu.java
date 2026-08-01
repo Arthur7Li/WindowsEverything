@@ -30,8 +30,10 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
 
 import javafx.concurrent.Task;
+import javafx.application.Platform;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.control.Alert;
@@ -48,6 +50,10 @@ import javafx.scene.layout.VBox;
 import javafx.scene.paint.Color;
 
 public class BoyanMenu {
+    // abdul 31/07/2026 [share one exclusive key with every workflow that uses the native Vary cancel channel]
+    private static final String VARY_OPERATION_KEY =
+            OperationRegistry.NATIVE_VARY_OPERATION_KEY;
+    private final OperationRegistry operations;
 
     // when using autovary3, if you want it to print all codes it finds, switch false to true in
     // the next line:
@@ -62,7 +68,7 @@ public class BoyanMenu {
     final Button middleVaryButton = new Button();
     final Button vary3Btn = new Button();
     final Button vary3BBtn = new Button();
-    
+
     final Button vary4Btn = new Button();
     final Button autoVaryBtn = new Button();
 
@@ -100,7 +106,7 @@ public class BoyanMenu {
     final CheckBox CScb = new CheckBox();
     final CheckBox CNScb = new CheckBox();
     final CheckBox Triplescb = new CheckBox();
-    
+
     //george june12,2019 start
     final CheckBox OSO2cb = new CheckBox();
     final CheckBox OSNO2cb = new CheckBox();
@@ -119,14 +125,17 @@ public class BoyanMenu {
 
 	public BoyanMenu(final Button cycleVaryButton, final Button middleVaryLButton, final Button polyAutoBtn, final Button varyLBtn,
                      final Button autoPolyVaryBtn, final TextField lineStartField, final TextField lineStepField, final TextField lineEndField,
-                     final Button superPolyVaryBtn, final CheckBox superAutoCb, final double TipOpenDelay, final double TipCloseDelay) {
+                     final Button superPolyVaryBtn, final CheckBox superAutoCb, final double TipOpenDelay, final double TipCloseDelay,
+                     final OperationRegistry operations) {
 
+        // abdul 27/07/2026 [bind Boyan Vary generations to the application lifetime before installing any action handlers]
+        this.operations = Objects.requireNonNull(operations, "operations");
         Utils.setupCustomTooltipBehavior((int) (TipOpenDelay * 1000), (int) (TipCloseDelay * 1000), 200);
 
         sideSpacingLbl.setText("Shots");
 
         movesLbl.setText("SideSum");
-        
+
         maxMovesText.setPrefWidth(55);
         maxMovesText.setTooltip(Utils.toolTip("The maximum side sum to search for"));
         maxMovesText.setText("200");
@@ -212,13 +221,13 @@ public class BoyanMenu {
       //george june12,2019 end
         varyOnePoint.setText("Vary1Pt");
         varyOnePoint.setTooltip(Utils.toolTip("When using varyL, if this is "
-        		+ "selected, it will shoot at that point and draw/write to the "
-        		+ "vary one point file the top X specified codes."));
+                + "selected, it will shoot at that point and draw/write to the "
+                + "vary one point file the top X specified codes."));
 
         autoCycleText.setText("3");
         autoCycleText.setTooltip(Utils.toolTip("For PolyVary, the number of subdivisions done"));
         autoCycleText.setPrefWidth(40);
-        
+
         cycleStepText.setText("1");
         cycleStepText.setTooltip(Utils.toolTip("For SuperPolyVary, the change in subdivisions each iteration"));
         cycleStepText.setPrefWidth(40);
@@ -255,73 +264,112 @@ public class BoyanMenu {
         Utils.colorButton(vary3BBtn, Color.SKYBLUE, Color.GOLD);
         vary3BBtn.setOnAction(event -> {
 
-        	final long startTime = System.currentTimeMillis();//george june 12,2019 added in !CS2cb.isSelected() && !CNS2cb.isSelected() && !ONS2cb.isSelected() && !OSNO2cb.isSelected() && !OSO2cb.isSelected()
-        	if (!CS2cb.isSelected() && !CNS2cb.isSelected() && !ONS2cb.isSelected() && !OSNO2cb.isSelected() && !OSO2cb.isSelected()) {
-        		final Alert alert = new Alert(AlertType.ERROR);
+            final long startTime = System.currentTimeMillis();//george june 12,2019 added in !CS2cb.isSelected() && !CNS2cb.isSelected() && !ONS2cb.isSelected() && !OSNO2cb.isSelected() && !OSO2cb.isSelected()
+            if (!CS2cb.isSelected() && !CNS2cb.isSelected() && !ONS2cb.isSelected() && !OSNO2cb.isSelected() && !OSO2cb.isSelected()) {
+                final Alert alert = new Alert(AlertType.ERROR);
 
                 alert.setTitle("Vary");
                 alert.setHeaderText("No CodeTypes");
                 alert.setContentText("Please select at least one codetype.");
                 alert.showAndWait();
-        	} else {
+            } else {
+                // abdul 27/07/2026 [freeze every Vary3B control before its worker starts]
+                final VarySearchRequest request = snapshotSearchRequest();
+                final double x1 = Double.parseDouble(varyX1Text.getText());
+                final double y1 = Double.parseDouble(varyY1Text.getText());
+                final double x2 = Double.parseDouble(varyX2Text.getText());
+                final double y2 = Double.parseDouble(varyY2Text.getText());
+                final double x3 = Double.parseDouble(varyX3Text.getText());
+                final double y3 = Double.parseDouble(varyY3Text.getText());
+                final double line1Cut = Double.parseDouble(line1CutText.getText());
+                final double line2Cut = Double.parseDouble(line2CutText.getText());
 	            final int shots = Integer.parseInt(shotsText.getText());
 	            final int max = Integer.parseInt(maxMovesText.getText());
 	            final int min = Integer.parseInt(minMovesText.getText());
 
-	            final ExecutorService executor = Executors.newFixedThreadPool(Utils.numThreads);
+                final Optional<OperationRegistry.OperationHandle> opened =
+                        openVaryOperation("Vary3B");
+                if (opened.isEmpty()) {
+                    return;
+                }
+                final OperationRegistry.OperationHandle operation = opened.get();
+                final ExecutorService executor;
+                try {
+                    // abdul 27/07/2026 [give Vary3B the same exclusive generation and owned inner pool as ordinary Vary]
+                    executor = operation.own(
+                            Executors.newFixedThreadPool(Utils.numThreads));
+                } catch (final RuntimeException exception) {
+                    operation.cancel();
+                    showVaryFailure("Vary3B", exception);
+                    return;
+                }
 
 	            System.out.println(String.format(
 	                "//------------------------- Vary3B %d shots at %d to %d moves -------------------------//", shots, min, max));
 
 	            final Task<MutableSortedSet<ClassifiedCodeSequence>> varyTask
-	            		= new Task<MutableSortedSet<ClassifiedCodeSequence>>() {
+                        = new Task<MutableSortedSet<ClassifiedCodeSequence>>() {
 
 					@Override
 					protected MutableSortedSet<ClassifiedCodeSequence> call() throws Exception {
-						return varyTriangles(2, executor);
+						return varyTriangles(
+                                x1, y1, x2, y2, x3, y3, line1Cut, line2Cut,
+                                2, request, executor);
 					}
 
 	            };
 
 	            final Progress progress = new Progress(varyTask);
-	            final Thread varyThread = new Thread(varyTask);
 
 	            varyTask.setOnSucceeded(success -> {
+                    if (!operation.permitsPublication()) {
+                        // abdul 28/07/2026 [discard Vary3B success queued after application shutdown]
+                        progress.close();
+                        return;
+                    }
 					try {
-						MutableSortedSet<ClassifiedCodeSequence> allCodes = varyTask.get();
+						final MutableSortedSet<ClassifiedCodeSequence> allCodes =
+                                varyTask.getValue();
 						allCodes.forEach(seq -> Database.saveToDatabase(seq, "garbage"));
 						hitsLabel.setText("" + allCodes.size());
 			            printCodes(allCodes, "vary3B.txt", true, true, allCodes.size());
-					} catch (InterruptedException | ExecutionException e) {
-						throw new RuntimeException(e);
-					}
-					final long endTime = System.currentTimeMillis();
-		        	System.out.println("Time: " + (endTime - startTime));
-		        	System.out.println("Time: " + Utils.timeConvert(endTime - startTime));
-		        	executor.shutdown();
-		        	progress.close();
+                        final long endTime = System.currentTimeMillis();
+                        System.out.println("Time: " + (endTime - startTime));
+                        System.out.println("Time: " + Utils.timeConvert(endTime - startTime));
+                        operation.complete();
+					} catch (final RuntimeException exception) {
+                        operation.cancel();
+                        showVaryFailure("Vary3B", exception);
+                    } finally {
+                        progress.close();
+                    }
 	            });
 
 	            varyTask.setOnCancelled(cancelled -> {
-	            	System.out.println("// Vary3B Cancelled");
-	            	varyThread.interrupt();
-	            	executor.shutdownNow();
-	            	progress.close();
+                    System.out.println("// Vary3B Cancelled");
+                    operation.cancel();
+                    progress.close();
 	            });
 	            varyTask.setOnFailed(fail -> {
-	            	System.out.println("// Vary3B failed");
-		        	executor.shutdown();
-	            	progress.close();
+                    System.out.println("// Vary3B failed");
+                    final boolean reportFailure =
+                            operation.permitsPublication();
+                    operation.cancel();
+                    progress.close();
+                    if (reportFailure) {
+                        showVaryFailure("Vary3B", varyTask.getException());
+                    }
 	            });
 
-	        	varyThread.start();
-
-	            progress.show();
-        	}
+                if (submitVaryTask(
+                        "Vary3B", varyTask, progress::close, operation)) {
+                    progress.show();
+                }
+            }
 
         });
 
-        
+
         vary4Btn.setText("V4");
         Utils.colorButton(vary4Btn, Color.SKYBLUE, Color.GOLD);
         vary4Btn.setTooltip(Utils.toolTip("Search for all codes at points specified above. See Instructions"
@@ -329,21 +377,23 @@ public class BoyanMenu {
         vary4Btn.setOnAction(event -> {
 
 
-        	final long startTime = System.currentTimeMillis();
-        	if (!CScb.isSelected() && !CNScb.isSelected() && !ONScb.isSelected() && !OSNOcb.isSelected() && !OSOcb.isSelected()) {
-        		final Alert alert = new Alert(AlertType.ERROR);
+            final long startTime = System.currentTimeMillis();
+            if (!CScb.isSelected() && !CNScb.isSelected() && !ONScb.isSelected() && !OSNOcb.isSelected() && !OSOcb.isSelected()) {
+                final Alert alert = new Alert(AlertType.ERROR);
 
                 alert.setTitle("Vary");
                 alert.setHeaderText("No CodeTypes");
                 alert.setContentText("Please select at least one codetype.");
                 alert.showAndWait();
-        	} else {
+            } else {
+                // abdul 27/07/2026 [use one immutable request for the synchronous Vary4 command]
+                final VarySearchRequest request = snapshotSearchRequest();
 	            final int shots = Integer.parseInt(shotsText.getText());
 	            final int max = Integer.parseInt(maxMovesText.getText());
 	            final int min = Integer.parseInt(minMovesText.getText());
 
 	            if (max > 250) {
-	            	final Alert alert = new Alert(AlertType.CONFIRMATION);
+                    final Alert alert = new Alert(AlertType.CONFIRMATION);
 
 	                alert.setTitle("Vary4");
 	                alert.setHeaderText("Vary4");
@@ -361,13 +411,32 @@ public class BoyanMenu {
 	                "//------------------------- Vary4 %d shots at %d to %d moves -------------------------//", shots, min, max));
 	            final ExecutorService executor = Executors.newFixedThreadPool(Utils.numThreads);
 
-	            final MutableSortedSet<ClassifiedCodeSequence> allCodes = varyTriangles(4, executor);
+                try {
+                    final MutableSortedSet<ClassifiedCodeSequence> allCodes =
+                            varyTriangles(
+                                    Double.parseDouble(varyX1Text.getText()),
+                                    Double.parseDouble(varyY1Text.getText()),
+                                    Double.parseDouble(varyX2Text.getText()),
+                                    Double.parseDouble(varyY2Text.getText()),
+                                    Double.parseDouble(varyX3Text.getText()),
+                                    Double.parseDouble(varyY3Text.getText()),
+                                    Double.parseDouble(line1CutText.getText()),
+                                    Double.parseDouble(line2CutText.getText()),
+                                    4, request, executor);
 
-	            printCodes(allCodes, "garbage.txt", true, false, allCodes.size());
-        	}
-        	final long endTime = System.currentTimeMillis();
-        	System.out.println("Time: " + (endTime - startTime));
-        	System.out.println("Time: " + Utils.timeConvert(endTime - startTime));
+                    printCodes(
+                            allCodes, "garbage.txt", true, false,
+                            allCodes.size());
+                } finally {
+                    // abdul 27/07/2026 [guarantee synchronous Vary4 releases its helper pool on success and every exceptional exit]
+                    Utils.safeShutdownExecutor(
+                            executor, 30,
+                            java.util.concurrent.TimeUnit.SECONDS);
+                }
+            }
+            final long endTime = System.currentTimeMillis();
+            System.out.println("Time: " + (endTime - startTime));
+            System.out.println("Time: " + Utils.timeConvert(endTime - startTime));
 
 
         });
@@ -390,7 +459,7 @@ public class BoyanMenu {
         maxPrinting.setMaxWidth(50);
         maxPrinting.setText("1");
         maxPrinting.setTooltip(Utils.toolTip("Set the max number of codes to be printed from a set"
-        		+ " found by varyL or PolyVary"));
+                + " found by varyL or PolyVary"));
 
         final HBox varyLine1HBox = new HBox(10, line1RDB, varyX1Text, varyY1Text);
         varyLine1HBox.setPadding(new Insets(0, 10, 10, 0));
@@ -421,7 +490,7 @@ public class BoyanMenu {
             new HBox(10, CNScb, CScb, ONScb, OSNOcb, OSOcb, Triplescb);//george june 18,2019 replaced vary4Btn with vary3Btn
         codeTypesHBox.setPadding(new Insets(0, 10, 10, 0));
         codeTypesHBox.setAlignment(Pos.CENTER);
-        
+
         //george june 12,2019 start
        // final HBox codeTypes2HBox =
          //       new HBox(10, vary3BBtn, CNS2cb, CS2cb, ONS2cb, OSNO2cb, OSO2cb);
@@ -432,15 +501,15 @@ public class BoyanMenu {
 
         /*final HBox vary3HBox =
             new HBox(10, vary3Btn, varyLBtn, hitsLabel, autoVaryButton, autoCycleText, minPrinting,
-            		maxPrinting);*/ //, autoIterText, autoStepText //added minPrinting george june6,2019
+                    maxPrinting);*/ //, autoIterText, autoStepText //added minPrinting george june6,2019
 
         // Zhao Yu Li, May 06, 2025.
         // Moved buildPolyCheckBox from to Viewr.java.
         // Added new MiddleVaryL button.
         final HBox vary3HBox =
-        		new HBox(10, cycleVaryButton, middleVaryLButton, varyLBtn, maxPrinting, polyAutoBtn,autoCycleText);
+                new HBox(10, cycleVaryButton, middleVaryLButton, varyLBtn, maxPrinting, polyAutoBtn,autoCycleText);
            // new HBox(10, vary4Btn, varyLBtn, hitsLabel, autoVaryButton, autoCycleText, //george june 18,2019 replaced vary3Btn with vary4Btn
-            		//maxPrinting); //, autoIterText, autoStepText
+                    //maxPrinting); //, autoIterText, autoStepText
 
         //new HBox(10, varyLBtn, hitsLabel, autoVaryButton, autoCycleText, //george june 18,2019 replaced vary3Btn with vary4Btn
           //      maxPrinting); //, autoIterText, autoStepText
@@ -458,7 +527,7 @@ public class BoyanMenu {
         vary3HBox.setPadding(new Insets(0, 10, 10, 0));
         vary3HBox.setAlignment(Pos.CENTER);
         //note vary4Btn says V4 on the button george June 18,2019
-        
+
         //final HBox autoHBox = new HBox(10, buildPolyCheckBox, varyOnePoint, allPixCheckBox, polyAutoBtn);
         //final HBox autoHBox = new HBox(10, buildPolyCheckBox, polyAutoBtn);
         //final HBox autoHBox = new HBox(10, polyAutoBtn);
@@ -476,6 +545,72 @@ public class BoyanMenu {
          //                            varyInfoHBox, codeTypes2HBox, vary3HBox, autoHBox);
     }//george june 12,2019 changed codeTypesHBox to codeTypes2HBox
 
+    private Optional<OperationRegistry.OperationHandle> openVaryOperation(
+            final String title) {
+        try {
+            return Optional.of(
+                    operations.openExclusive(title, VARY_OPERATION_KEY));
+        } catch (final RejectedExecutionException exception) {
+            final Alert alert = new Alert(AlertType.INFORMATION);
+            alert.setTitle(title);
+            alert.setHeaderText("Vary operation unavailable");
+            alert.setContentText(exception.getMessage());
+            alert.showAndWait();
+            return Optional.empty();
+        }
+    }
+
+    private boolean submitVaryTask(
+            final String title,
+            final Task<?> task,
+            final Runnable closeProgress,
+            final OperationRegistry.OperationHandle operation) {
+        try {
+            // abdul 27/07/2026 [replace raw Vary Threads with one registered outer executor whose Future is cancelled and joined on application shutdown]
+            final ExecutorService outerExecutor = operation.own(
+                    Executors.newSingleThreadExecutor());
+            operation.track(task);
+            operation.track(outerExecutor.submit(task));
+            return true;
+        } catch (final RuntimeException exception) {
+            final boolean reportFailure =
+                    operation.permitsPublication();
+            operation.cancel();
+            closeProgress.run();
+            if (reportFailure) {
+                showVaryFailure(title, exception);
+            }
+            return false;
+        }
+    }
+
+    private static void showVaryFailure(
+            final String title,
+            final Throwable failure) {
+        final Alert alert = new Alert(AlertType.ERROR);
+        alert.setTitle(title);
+        alert.setHeaderText(title + " failed");
+        alert.setContentText(
+                failure == null ? "Unknown worker failure."
+                        : Objects.toString(
+                                failure.getMessage(),
+                                failure.getClass().getSimpleName()));
+        alert.showAndWait();
+    }
+
+    private static RuntimeException propagateWorkerFailure(
+            final Exception exception) {
+        // abdul 27/07/2026 [preserve interruption and surface inner Vary failures so the registered generation reaches its failure terminal path]
+        if (exception instanceof InterruptedException) {
+            Thread.currentThread().interrupt();
+        }
+        final Throwable cause =
+                exception instanceof ExecutionException
+                        && exception.getCause() != null
+                        ? exception.getCause() : exception;
+        return new RuntimeException(cause);
+    }
+
     // Zhao Yu Li, May 05, 2025.
     // Function that performs the Vary computations. This function is only used for Vary and MiddleVary because they
     // carry out the same computations, but just prints the results differently.
@@ -489,11 +624,35 @@ public class BoyanMenu {
             alert.setContentText("Please select at least one codetype.");
             alert.showAndWait();
         } else {
-            final int shots = Integer.parseInt(shotsText.getText());
-            final int max = Integer.parseInt(maxMovesText.getText());
-            final int min = Integer.parseInt(minMovesText.getText());
+            final VarySearchRequest request = snapshotSearchRequest();
+            final double x1 = Double.parseDouble(varyX1Text.getText());
+            final double y1 = Double.parseDouble(varyY1Text.getText());
+            final double x2 = Double.parseDouble(varyX2Text.getText());
+            final double y2 = Double.parseDouble(varyY2Text.getText());
+            final double x3 = Double.parseDouble(varyX3Text.getText());
+            final double y3 = Double.parseDouble(varyY3Text.getText());
+            final double cut1 = Double.parseDouble(line1CutText.getText());
+            final double cut2 = Double.parseDouble(line2CutText.getText());
+            final int shots = request.shots();
+            final int max = request.maximumMoves();
+            final int min = request.minimumMoves();
 
-            final ExecutorService executor = Executors.newFixedThreadPool(Utils.numThreads);
+            final Optional<OperationRegistry.OperationHandle> opened =
+                    openVaryOperation(title);
+            if (opened.isEmpty()) {
+                return;
+            }
+            final OperationRegistry.OperationHandle operation = opened.get();
+            final ExecutorService executor;
+            try {
+                // abdul 27/07/2026 [make ordinary and Middle Vary inner work part of the exclusive application-owned generation]
+                executor = operation.own(
+                        Executors.newFixedThreadPool(Utils.numThreads));
+            } catch (final RuntimeException exception) {
+                operation.cancel();
+                showVaryFailure(title, exception);
+                return;
+            }
 
             System.out.printf(
                     "//------------------------- " + (printMid ? "Middle " : "") + "Vary %d shots at %d to %d moves -------------------------//%n", shots, min, max);
@@ -503,46 +662,60 @@ public class BoyanMenu {
 
                 @Override
                 protected MutableSortedSet<ClassifiedCodeSequence> call() throws Exception {
-                    return varyTriangles(3, executor);
+                    return varyTriangles(
+                            x1, y1, x2, y2, x3, y3, cut1, cut2,
+                            3, request, executor);
                 }
 
             };
 
             //final Progress progress = new Progress(varyTask);
             final ProgressWithStatus progress = new ProgressWithStatus(varyTask, "Calling findCodes3 (no status)", 0);
-            final Thread varyThread = new Thread(varyTask);
 
             varyTask.setOnSucceeded(success -> {
+                if (!operation.permitsPublication()) {
+                    // abdul 28/07/2026 [discard ordinary or Middle Vary success queued after application shutdown]
+                    progress.close();
+                    return;
+                }
                 try {
-                    MutableSortedSet<ClassifiedCodeSequence> allCodes = varyTask.get();
+                    final MutableSortedSet<ClassifiedCodeSequence> allCodes =
+                            varyTask.getValue();
                     allCodes.forEach(seq -> Database.saveToDatabase(seq, "garbage"));
                     hitsLabel.setText("" + allCodes.size());
                     printCodes(allCodes, outFile, true, true, allCodes.size(), printMid);
-                } catch (InterruptedException | ExecutionException e) {
-                    throw new RuntimeException(e);
+                    final long endTime = System.currentTimeMillis();
+                    System.out.println("Time: " + (endTime - startTime));
+                    System.out.println("Time: " + Utils.timeConvert(endTime - startTime));
+                    operation.complete();
+                } catch (final RuntimeException exception) {
+                    operation.cancel();
+                    showVaryFailure(title, exception);
+                } finally {
+                    progress.close();
                 }
-                final long endTime = System.currentTimeMillis();
-                System.out.println("Time: " + (endTime - startTime));
-                System.out.println("Time: " + Utils.timeConvert(endTime - startTime));
-                executor.shutdown();
-                progress.close();
             });
 
             varyTask.setOnCancelled(cancelled -> {
                 System.out.println("// " + title + " Cancelled");
-                varyThread.interrupt();
-                executor.shutdownNow();
+                operation.cancel();
                 progress.close();
             });
             varyTask.setOnFailed(fail -> {
                 System.out.println("// " + title + " failed");
-                executor.shutdown();
+                final boolean reportFailure =
+                        operation.permitsPublication();
+                operation.cancel();
                 progress.close();
+                if (reportFailure) {
+                    showVaryFailure(title, varyTask.getException());
+                }
             });
 
-            varyThread.start();
-
-            progress.show();
+            if (submitVaryTask(
+                    title, varyTask, progress::close, operation)) {
+                progress.show();
+            }
         }
     }
 
@@ -564,23 +737,32 @@ public class BoyanMenu {
         }
     }
 
-    private MutableSortedSet<ClassifiedCodeSequence> varyTriangles(
-    		final int version, final ExecutorService exe) {
-        return varyTriangles(Double.parseDouble(varyX1Text.getText()),
-                              Double.parseDouble(varyY1Text.getText()),
-                              Double.parseDouble(varyX2Text.getText()),
-                              Double.parseDouble(varyY2Text.getText()),
-                              Double.parseDouble(varyX3Text.getText()),
-                              Double.parseDouble(varyY3Text.getText()),
-                              Double.parseDouble(line1CutText.getText()),
-                              Double.parseDouble(line2CutText.getText()),
-                              version, exe);
+    VarySearchRequest snapshotSearchRequest() {
+        if (!Platform.isFxApplicationThread()) {
+            throw new IllegalStateException(
+                    "Vary controls must be snapshotted on the JavaFX thread.");
+        }
+        // abdul 27/07/2026 [capture every search/range/type value once so Vary workers never read live JavaFX controls]
+        return new VarySearchRequest(
+                Integer.parseInt(minMovesText.getText()),
+                Integer.parseInt(maxMovesText.getText()),
+                Integer.parseInt(shotsText.getText()),
+                Integer.parseInt(autoIterText.getText()),
+                Integer.parseInt(autoStepText.getText()),
+                Integer.parseInt(maxPrinting.getText()),
+                new boolean[]{
+                    OSOcb.isSelected(), CScb.isSelected(),
+                    CNScb.isSelected(), ONScb.isSelected(),
+                    OSNOcb.isSelected(), OSO2cb.isSelected(),
+                    CS2cb.isSelected(), CNS2cb.isSelected(),
+                    ONS2cb.isSelected(), OSNO2cb.isSelected()});
     }
 
     public MutableSortedSet<ClassifiedCodeSequence> varyTriangles(
-    		final double aX1, final double aY1, final double aX2, final double aY2,
+            final double aX1, final double aY1, final double aX2, final double aY2,
             final double aX3, final double aY3, final double aCut1, final double aCut2,
-            final int version, final ExecutorService exe) {
+            final int version, final VarySearchRequest request,
+            final ExecutorService exe) {
 
         final MutableSortedSet<ClassifiedCodeSequence> bareCodesFound = new TreeSortedSet<>();
 
@@ -604,34 +786,39 @@ public class BoyanMenu {
                     b = aY1;
                 }
 
-                final MutableSortedSet<ClassifiedCodeSequence> pointCodes = findCodes(a, b, version, exe);
+                final MutableSortedSet<ClassifiedCodeSequence> pointCodes =
+                        findCodes(a, b, version, request, exe);
                 bareCodesFound.addAll(pointCodes);
             }
         }
         return bareCodesFound;
     }
+    // abdul 28/07/2026 [thread the admitted immutable request through both recursive VaryL overloads]
     public MutableSortedSet<ClassifiedCodeSequence> varyTrianglesL(
-    				final Vector2 point, final ExecutorService executor) { // Got rid of findCodes since it was unecessary complexity
-        return findCodes(point.x, point.y, 3, executor);
+                    final Vector2 point, final VarySearchRequest request,
+                    final ExecutorService executor) {
+        return findCodes(point.x, point.y, 3, request, executor);
     }
 
     // Overloading for seperate maximums
     public MutableSortedSet<ClassifiedCodeSequence> varyTrianglesL(
-    				final Vector2 point, 
-                    final int CSmaxSS, 
-                    final int OSOmaxSS, 
-                    final int OSNOmaxSS, 
-                    final ExecutorService executor) 
+                    final Vector2 point,
+                    final int CSmaxSS,
+                    final int OSOmaxSS,
+                    final int OSNOmaxSS,
+                    final VarySearchRequest request,
+                    final ExecutorService executor)
                     { // Got rid of findCodes since it was unecessary complexity
 
-        final int min = Integer.parseInt(minMovesText.getText());
-        final double shots = Integer.parseInt(shotsText.getText());
+        final int min = request.minimumMoves();
+        final double shots = request.shots();
+        final boolean[] requestTypes = request.allTypes();
 
         final boolean[] noCS = {
-            OSOmaxSS > 0, 
+            OSOmaxSS > 0,
             false,
-            CNScb.isSelected(), 
-            ONScb.isSelected(), 
+            requestTypes[2],
+            requestTypes[3],
             OSNOmaxSS > 0};
 
         final boolean[] onlyCS = {false, CSmaxSS > 0, false, false, false};
@@ -640,7 +827,7 @@ public class BoyanMenu {
 
         unfilteredCodesFound.addAll(findCodes3(point.x, point.y, min, CSmaxSS, shots, onlyCS, executor));
         unfilteredCodesFound.addAll(findCodes3(point.x, point.y, min, Math.max(OSOmaxSS, OSNOmaxSS), shots, noCS, executor));
-        
+
         for(final ClassifiedCodeSequence code: unfilteredCodesFound) { // Filter out overly large OSO/OSNO
             final CodeType type = code.codeType;
             if(type.equals(CodeType.OSO) && code.codeSum >= OSOmaxSS) {
@@ -651,32 +838,32 @@ public class BoyanMenu {
             }
             codesFound.add(code);
         }
-    	return codesFound;
+        return codesFound;
     }
 
+    // abdul 28/07/2026 [thread the admitted immutable request through both PolyVary search overloads]
     public MutableSortedSet<ClassifiedCodeSequence> autoVary(
-                final Vector2 point, 
+                final Vector2 point,
+                final VarySearchRequest request,
                 final ExecutorService exe) {
 
-        int max = Integer.parseInt(maxMovesText.getText());
-        int min = Integer.parseInt(minMovesText.getText());
+        int max = request.maximumMoves();
+        int min = request.minimumMoves();
 
-        final int iterate = Integer.parseInt(autoIterText.getText());
-        final int step = Integer.parseInt(autoStepText.getText());
-        final int shots = Integer.parseInt(shotsText.getText());
+        final int iterate = request.autoIterations();
+        final int step = request.autoStep();
+        final int shots = request.shots();
 
-        final boolean[] types = {OSOcb.isSelected(), CScb.isSelected(),
-                                 CNScb.isSelected(), ONScb.isSelected(), 
-                                 OSNOcb.isSelected(), OSO2cb.isSelected(), 
-                                 CS2cb.isSelected(), CNS2cb.isSelected(),
-                                 ONS2cb.isSelected(), OSNO2cb.isSelected()};
+        final boolean[] types = request.allTypes();
         //george june 12,2019 added , OSO2cb.isSelected(), CS2cb.isSelected(),
         //CNS2cb.isSelected(), ONS2cb.isSelected(), OSNO2cb.isSelected()
 
         for (int i = 0; i < iterate + 1; i++) {
             final MutableSortedSet<ClassifiedCodeSequence> codesFound = new TreeSortedSet<>();
             codesFound.addAll(findCodes3(point.x, point.y, min, max, shots, types, exe));
-            printCodes(codesFound, "garbage.txt", printAll, true, Integer.parseInt(maxPrinting.getText()));
+            printCodes(
+                    codesFound, "garbage.txt", printAll, true,
+                    request.maximumPrinting());
 
             if (codesFound.isEmpty()) {
                 min = Integer.valueOf(max);
@@ -691,28 +878,30 @@ public class BoyanMenu {
 
     // Overloading of autoVary for seperate maximums during overrideSS
     public MutableSortedSet<ClassifiedCodeSequence> autoVary(
-        final Vector2 point, 
-        final int CSmaxSS, 
-        final int OSOmaxSS, 
-        final int OSNOmaxSS, 
+        final Vector2 point,
+        final int CSmaxSS,
+        final int OSOmaxSS,
+        final int OSNOmaxSS,
+        final VarySearchRequest request,
         final ExecutorService exe) {
 
-        int CSmin = Integer.parseInt(minMovesText.getText());
+        int CSmin = request.minimumMoves();
         int CSstep = 0;
 
-        int OSmin = Integer.parseInt(minMovesText.getText());
+        int OSmin = request.minimumMoves();
         int OSstep = 0;
 
-        final int iterate = Integer.parseInt(autoIterText.getText());
-        final int step = Integer.parseInt(autoStepText.getText());
-        final int shots = Integer.parseInt(shotsText.getText());
+        final int iterate = request.autoIterations();
+        final int step = request.autoStep();
+        final int shots = request.shots();
+        final boolean[] requestTypes = request.allTypes();
 
         final boolean[] noCS = {OSOmaxSS > 0, false,
-                                 CNScb.isSelected(), ONScb.isSelected(), 
-                                 OSNOmaxSS > 0, OSO2cb.isSelected(), 
-                                 CS2cb.isSelected(), CNS2cb.isSelected(), 
-                                 ONS2cb.isSelected(), OSNO2cb.isSelected()};
-        
+                                 requestTypes[2], requestTypes[3],
+                                 OSNOmaxSS > 0, requestTypes[5],
+                                 requestTypes[6], requestTypes[7],
+                                 requestTypes[8], requestTypes[9]};
+
         final boolean[] onlyCS = {false, CSmaxSS > 0,
             false, false, false, false, false, false, false, false
         };
@@ -737,7 +926,9 @@ public class BoyanMenu {
                 }
                 codesFound.add(code);
             }
-            printCodes(codesFound, "garbage.txt", printAll, true, Integer.parseInt(maxPrinting.getText()));
+            printCodes(
+                    codesFound, "garbage.txt", printAll, true,
+                    request.maximumPrinting());
 
             if (codesFound.isEmpty()) {
                 CSmin = CSmaxSS;
@@ -751,40 +942,42 @@ public class BoyanMenu {
         return new TreeSortedSet<>();
     }
 
+    // abdul 28/07/2026 [derive all search bounds and type selections from the immutable request rather than live controls]
     private MutableSortedSet<ClassifiedCodeSequence> findCodes(
-    		final double xCoord, 
-            final double yCoord, 
-            final int version, 
+            final double xCoord,
+            final double yCoord,
+            final int version,
+            final VarySearchRequest request,
             final ExecutorService exe) {
 
         final MutableSortedSet<ClassifiedCodeSequence> out = new TreeSortedSet<>();
 
-        final int max = Integer.parseInt(maxMovesText.getText());
-        final int min = Integer.parseInt(minMovesText.getText());
-        final double shots = Integer.parseInt(shotsText.getText());
+        final int max = request.maximumMoves();
+        final int min = request.minimumMoves();
+        final double shots = request.shots();
 
-        final boolean[] types = {OSOcb.isSelected(), CScb.isSelected(),
-                                 CNScb.isSelected(), ONScb.isSelected(), OSNOcb.isSelected()};
+        final boolean[] allTypes = request.allTypes();
+        final boolean[] types = Arrays.copyOf(allTypes, 5);
+        final boolean[] types2 = Arrays.copyOfRange(allTypes, 5, 10);
 
-        final boolean[] types2 = {OSO2cb.isSelected(), CS2cb.isSelected(),
-                CNS2cb.isSelected(), ONS2cb.isSelected(), OSNO2cb.isSelected()};
 
-        
         //george june12,2019 added , OSO2cb.isSelected(), CS2cb.isSelected(),
         //CNS2cb.isSelected(), ONS2cb.isSelected(), OSNO2cb.isSelected()
         if (version == 4) {
-        	out.addAll(findCodes4(xCoord, yCoord, min, max, shots, types));
+            out.addAll(findCodes4(
+                    xCoord, yCoord, min, max, shots, types, exe));
         } else if (version == 3) {
-        	out.addAll(findCodes3(xCoord, yCoord, min, max, shots, types, exe));
+            out.addAll(findCodes3(xCoord, yCoord, min, max, shots, types, exe));
         } else if (version == 2) {
-        	out.addAll(findCodes2(xCoord, yCoord, min, max, shots, types2, exe));
+            out.addAll(findCodes2(xCoord, yCoord, min, max, shots, types2, exe));
         } else {
-        	throw new RuntimeException("Version for varyTriangles must be 3 or 4");
+            throw new RuntimeException("Version for varyTriangles must be 3 or 4");
         }
         return out;
     }
 
     // boolean[] types should be in the order OSO, CS, CNS, ONS, OSNO
+    // abdul 28/07/2026 [surface interruption and worker failure from the first parallel code-search helper]
     public static MutableSet<ClassifiedCodeSequence> findCodes2(
         final double xCoord, final double yCoord, final int min, final int max, final double shots,
         final boolean[] types, final ExecutorService executor) {
@@ -801,15 +994,15 @@ public class BoyanMenu {
         final double increment = base / (shots + 1);
 
         if (types[1] && !types[0] && !types[2] && !types[0] && !types[4]) {
-        	//run the CS-specific code
+            //run the CS-specific code
 
-        	double xAngle = Double.valueOf(xRad);
-        	double yAngle = Double.valueOf(yRad);
+            double xAngle = Double.valueOf(xRad);
+            double yAngle = Double.valueOf(yRad);
 
-        	for (int i = 0; i < 3; i++) {
+            for (int i = 0; i < 3; i++) {
 
-        		final Double finX = xAngle;
-        		final Double finY = yAngle;
+                final Double finX = xAngle;
+                final Double finY = yAngle;
 
 	            final Future<MutableList<ClassifiedCodeSequence>> future =
 	                executor.submit(() -> VaryCS.fireAway(min, max, finX, finY));
@@ -818,27 +1011,27 @@ public class BoyanMenu {
 
 	            double zAngle = Double.valueOf(Math.PI - xAngle - yAngle);
 	            xAngle = Double.valueOf(yAngle);
-	        	yAngle = Double.valueOf(zAngle);
+                yAngle = Double.valueOf(zAngle);
 	        }
         }
         else {
-        	//run the non-CS-specific code
+            //run the non-CS-specific code
 	        for (int count = 1; count <= shots; ++count) {
 
 	            final double pos = count * increment;
 
 	            final Future<MutableList<ClassifiedCodeSequence>> future =
-	            		executor.submit(() -> Vary3.fireAway(min, max, xRad, yRad, pos));
+                        executor.submit(() -> Vary3.fireAway(min, max, xRad, yRad, pos));
 
 	            futures.add(future);
 	        }
         }
 
         for (final Future<MutableList<ClassifiedCodeSequence>> future : futures) {
-        	try {
+            try {
                 for (final ClassifiedCodeSequence codeSeq : future.get()) {
                     final CodeType type = codeSeq.codeType;
-                    
+
                     /*if ((types[0] && type.equals(CodeType.OSO)) ||
                         (types[1] && type.equals(CodeType.CS))  ||
                         (types[2] && type.equals(CodeType.CNS)) ||
@@ -849,16 +1042,17 @@ public class BoyanMenu {
                         (types[1] && type.equals(CodeType.CS))  ||
                         (types[2] && type.equals(CodeType.CNS)) ||
                         (types[3] && type.equals(CodeType.ONS)) ||
-                        (types[4] && type.equals(CodeType.OSNO))) 
+                        (types[4] && type.equals(CodeType.OSNO)))
                         {
 
-                    	if (codeSeq.codeSum >= min) {
-                    		codeSeqs.add(codeSeq);
-                    	}
+                        if (codeSeq.codeSum >= min) {
+                            codeSeqs.add(codeSeq);
+                        }
                     }
                 }
-            } catch (InterruptedException | ExecutionException e) {
-                throw new RuntimeException(e);
+            } catch (final InterruptedException | ExecutionException exception) {
+                Utils.cancelFutures(futures);
+                throw propagateWorkerFailure(exception);
             }
         }
 
@@ -872,6 +1066,7 @@ public class BoyanMenu {
      * 2. code type will transfer to the backend will computing, only transfer match one back to java here reduce memory usage
      * 3. parallel computing most of the for loop
      */
+    // abdul 28/07/2026 [surface interruption and worker failure from the second parallel code-search helper]
     public static MutableSet<ClassifiedCodeSequence> findCodes3(
         final double xCoord, final double yCoord, final int min, final int max, final double shots,
         final boolean[] types, final ExecutorService executor) {
@@ -900,13 +1095,13 @@ public class BoyanMenu {
         String reqTypes = selectedTypes.toString().trim();
         //run the CS-specific code
         if (types[1]) {
-        	double xAngle = Double.valueOf(xRad);
-        	double yAngle = Double.valueOf(yRad);
+            double xAngle = Double.valueOf(xRad);
+            double yAngle = Double.valueOf(yRad);
 
-        	for (int i = 0; i < 3; i++) {
+            for (int i = 0; i < 3; i++) {
 
-        		final Double finX = xAngle;
-        		final Double finY = yAngle;
+                final Double finX = xAngle;
+                final Double finY = yAngle;
 
                 final Future<MutableList<ClassifiedCodeSequence>> future =
 	                executor.submit(() -> VaryCS.fireAway(min, max, finX, finY,reqTypes));
@@ -917,13 +1112,13 @@ public class BoyanMenu {
                 try {
                     MutableList<ClassifiedCodeSequence> result = future.get();
                     futures.addAll(result);
-                } catch (InterruptedException | ExecutionException e) {
-                    throw new RuntimeException(e);  // or handle it however you need
+                } catch (final InterruptedException | ExecutionException exception) {
+                    throw propagateWorkerFailure(exception);
                 }
 
 	            double zAngle = Double.valueOf(Math.PI - xAngle - yAngle);
 	            xAngle = Double.valueOf(yAngle);
-	        	yAngle = Double.valueOf(zAngle);
+                yAngle = Double.valueOf(zAngle);
 	        }
         }
         //run the non-CS-specific code
@@ -934,7 +1129,7 @@ public class BoyanMenu {
 	            final double pos = count * increment;
 
 	            final Future<MutableList<ClassifiedCodeSequence>> future =
-	            		executor.submit(() -> Vary3.fireAway(min, max, xRad, yRad, pos,reqTypes));
+                        executor.submit(() -> Vary3.fireAway(min, max, xRad, yRad, pos,reqTypes));
                         //executor.submit(() -> Vary3.fireAway(min, max, xRad, yRad, pos));
 
                 futures2.add(future);
@@ -943,8 +1138,9 @@ public class BoyanMenu {
                 try {
                     MutableList<ClassifiedCodeSequence> partial = future.get(); // get the actual list
                     futures.addAll(partial); // now addAll on MutableList, not Future
-                } catch (InterruptedException | ExecutionException e) {
-                    e.printStackTrace(); // handle exceptions as needed
+                } catch (final InterruptedException | ExecutionException exception) {
+                    Utils.cancelFutures(futures2);
+                    throw propagateWorkerFailure(exception);
                 }
             }
         }
@@ -955,15 +1151,16 @@ public class BoyanMenu {
     }
 
     // boolean[] types should be in the order OSO, CS, CNS, ONS, OSNO
+    // abdul 28/07/2026 [keep the final Vary4 helper on its caller-owned executor and failure contract]
     private static MutableSet<ClassifiedCodeSequence> findCodes4(
         final double xCoord, final double yCoord, final int min, final int max, final double shots,
-        final boolean[] types) {
+        final boolean[] types, final ExecutorService executor) {
 
         final double xRad = FastMath.toRadians(xCoord);
         final double yRad = FastMath.toRadians(yCoord);
 
         final MutableSet<ClassifiedCodeSequence> codeSeqs = new UnifiedSet<>();
-        
+
 
         StringBuilder selectedTypes = new StringBuilder();
 
@@ -976,18 +1173,18 @@ public class BoyanMenu {
 
         String reqTypes = selectedTypes.toString().trim();
 
-        final ExecutorService executor = Executors.newFixedThreadPool(Utils.numThreads);
+        // abdul 27/07/2026 [reuse the caller-owned Vary4 pool so lifecycle cleanup cannot be bypassed by a hidden executor]
         if (types[1] && !types[0] && !types[2] && !types[0] && !types[4]) {
-        	//run the CS-specific code
+            //run the CS-specific code
 
 
-        	double xAngle = Double.valueOf(xRad);
-        	double yAngle = Double.valueOf(yRad);
+            double xAngle = Double.valueOf(xRad);
+            double yAngle = Double.valueOf(yRad);
 
-        	for (int i = 0; i < 3; i++) {
+            for (int i = 0; i < 3; i++) {
 
-        		final Double finX = xAngle;
-        		final Double finY = yAngle;
+                final Double finX = xAngle;
+                final Double finY = yAngle;
 
                 final Future<MutableList<ClassifiedCodeSequence>> future =
 	                executor.submit(() -> VaryCS.fireAway(min, max, finX, finY,reqTypes));
@@ -998,14 +1195,14 @@ public class BoyanMenu {
                 try {
                     MutableList<ClassifiedCodeSequence> result = future.get();
                     codeSeqs.addAll(result);
-                } catch (InterruptedException | ExecutionException e) {
-                    throw new RuntimeException(e);  // or handle it however you need
+                } catch (final InterruptedException | ExecutionException exception) {
+                    throw propagateWorkerFailure(exception);
                 }
 
 	            double zAngle = Double.valueOf(Math.PI - xAngle - yAngle);
 	            xAngle = Double.valueOf(yAngle);
-	        	yAngle = Double.valueOf(zAngle);
-	        
+                yAngle = Double.valueOf(zAngle);
+
             }
 
         }
@@ -1015,7 +1212,6 @@ public class BoyanMenu {
             codeSeqs.addAll(future);
         }
 
-        executor.shutdown();
         return codeSeqs;
     }
 
@@ -1031,9 +1227,9 @@ public class BoyanMenu {
     // a method for printing a set of codes. Can set print to false, which makes this function just write
     // to the file.
     public static void printCodes(final MutableSortedSet<ClassifiedCodeSequence> allCodes, final String file,
-    		                      final boolean print, final boolean erase, final int Number, final boolean printMid) {
+                                  final boolean print, final boolean erase, final int Number, final boolean printMid) {
 
-    	final Path path = Paths.get(file);
+        final Path path = Paths.get(file);
 
         if (!Files.exists(path)) {
             try {
@@ -1044,13 +1240,13 @@ public class BoyanMenu {
         }
 
         if (erase) {
-        	PrintWriter pw;
+            PrintWriter pw;
 			try {
 				pw = new PrintWriter(file);
 			} catch (FileNotFoundException e) {
 				throw new RuntimeException("Couldn't erase the file");
 			}
-        	pw.close();
+            pw.close();
         }
 
         final ArrayList<ClassifiedCodeSequence> splitCodes;
@@ -1129,13 +1325,13 @@ public class BoyanMenu {
         int count = 0;
         ArrayList<String> codes = new ArrayList<>();
         for (final ClassifiedCodeSequence code : organizedCodes) {
-        	count += 1;
-    		final String codeString = Utils.standard(code, count);
-        	if (count <= Number && print) {
-        		System.out.println(codeString);
+            count += 1;
+            final String codeString = Utils.standard(code, count);
+            if (count <= Number && print) {
+                System.out.println(codeString);
                 //codes.add(codeString.substring(5));
                 codes.add(codeString.substring(codeString.indexOf("-") + 2));
-        	}
+            }
             try {
                 final PrintStream output = new PrintStream(new FileOutputStream(file, true));
                 output.println(codeString + " " + CodeSequence.evenOddSequence(code.codeSequence.codeNumbers));

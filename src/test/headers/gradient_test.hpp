@@ -17,6 +17,39 @@ struct print_log_value<std::pair<T, S>> {
 } // namespace test_tools
 } // namespace boost
 
+// abdul 27/07/2026 [lock the two corner-specific factor-recovery paths to their actual canonical evaluators]
+BOOST_AUTO_TEST_CASE(test_special_corner_gradient_uses_matching_corner) {
+    {
+        // sin(x+y) + sin(x-y) = 2 sin(x) cos(y).  At (0, pi/2)
+        // the ordinary gradient vanishes.  The symbolic boundary-factor
+        // normalization divides the physical grad(2cos(y)) by two, yielding
+        // the canonical reduced gradient (0,-1).
+        const auto equation = parse_lin_com_map_sin_xy("sin(x+y)+sin(x-y)");
+        const EquationGradient<XY, Equation<Sin>> equation_gradient{equation};
+        const Vector2<Interval> point{
+            Interval{0},
+            boost::math::constants::half_pi<Interval>()};
+
+        const auto recovered = gradient(equation_gradient, point);
+        BOOST_TEST(recovered[0] == Interval{0});
+        BOOST_TEST(recovered[1] == Interval{-1});
+    }
+
+    {
+        // sin(x+y) - sin(x-y) = 2 cos(x) sin(y).  At (pi/2, 0)
+        // the canonical normalized recovered gradient is (-1,0).
+        const auto equation = parse_lin_com_map_sin_xy("sin(x+y)-sin(x-y)");
+        const EquationGradient<XY, Equation<Sin>> equation_gradient{equation};
+        const Vector2<Interval> point{
+            boost::math::constants::half_pi<Interval>(),
+            Interval{0}};
+
+        const auto recovered = gradient(equation_gradient, point);
+        BOOST_TEST(recovered[0] == Interval{-1});
+        BOOST_TEST(recovered[1] == Interval{0});
+    }
+}
+
 #if 0
 BOOST_AUTO_TEST_CASE(test_sin_gradient_pi2_pi2) {
 

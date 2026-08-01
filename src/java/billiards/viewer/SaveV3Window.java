@@ -14,11 +14,12 @@ import javafx.scene.layout.VBox;
 import javafx.scene.paint.Color;
 import javafx.scene.text.Font;
 import javafx.stage.FileChooser;
+import javafx.stage.FileChooser.ExtensionFilter;
 import javafx.stage.Stage;
 
-import java.io.File;
-import java.io.FileWriter;
 import java.io.IOException;
+import java.nio.file.Path;
+import java.util.List;
 
 public class SaveV3Window {
 
@@ -67,6 +68,8 @@ public class SaveV3Window {
         saveToField.setEditable(true);
         saveToField.setFont(Font.font("Monaco", 16));
         saveToField.setText(defaultLocation);
+        // abdul 27/07/2026 [use a save chooser that supports new text destinations while retaining editable typed paths]
+        fileChooser.getExtensionFilters().add(new ExtensionFilter("Text files", "*.txt"));
 
         saveToLabel.setText("Save to: ");
         saveToLabel.setPadding(new Insets(5,5,10,10));
@@ -129,7 +132,8 @@ public class SaveV3Window {
     private void browse() {
         // browse function in the event of browse button pressed.
         // raises Error alert if file selected is not a text file.
-        final File file = fileChooser.showOpenDialog(stage);
+        // abdul 27/07/2026 [use the displayed save destination as the same path later consumed by every file command]
+        final java.io.File file = fileChooser.showSaveDialog(stage);
 
         if (file != null) {
             String path = file.getAbsolutePath();
@@ -146,125 +150,57 @@ public class SaveV3Window {
         }
     }
 
+    // abdul 27/07/2026 [route both result sources through one validated immutable export request]
     private void saveM() {
-        // save function in the event of save button pressed
-        // Handles the exceptions where codes are not saved in the case of IO exception
-        // or file not selected.
-        try {
-            count = Integer.parseInt(countField.getText());
-            if (!location.endsWith(".txt")) {
-                final Alert select = new Alert(AlertType.ERROR);
-                select.setContentText("File not selected.");
-                select.show();
-            }
-            else {
-                defaultLocation = location;
-                File toSave = new File(location);
-                FileWriter writer = new FileWriter(location, true);
-                if (toSave.createNewFile()) {
-                    for (String code:BoyanMenu.savePairs){
-                        writer.write(code + "\n");
-                    }
-                }
-                else {
-                    if (count <= BoyanMenu.savePairs.size()) {
-                        for (int i = 0; i < count; i++) {
-                            String code = BoyanMenu.savePairs.get(i);
-                            writer.append(code + "\n");
-                        }
-                    }
-                    else {
-                        writer.close();
-                        throw new IOException("Count is more than number of codes.");
-                    }
-                }
-                writer.close();
-                stage.close();
-            }
-        }
-        catch (IOException e) {
-            final Alert select = new Alert(AlertType.ERROR);
-            String message = "Code sequences not saved.";
-            final String detail = e.getMessage();
-            if (detail != null && !detail.isEmpty()) {
-                message += "\n" + detail;
-            }
-            select.setContentText(message);
-            select.show();
-        }
+        saveCodes(List.copyOf(BoyanMenu.savePairs));
     }
 
     private void saveL() {
-        try {
-            count = Integer.parseInt(countField.getText());
-            if (!location.endsWith(".txt")) {
-                final Alert select = new Alert(AlertType.ERROR);
-                select.setContentText("File not selected.");
-                select.show();
-            }
-            else {
-                defaultLocation = location;
-                File toSave = new File(location);
-                FileWriter writer = new FileWriter(location, true);
-                if (toSave.createNewFile()) {
-                    for (String code:BoyanMenu.varySeq){
-                        writer.write(code + "\n");
-                    }
-                }
-                else {
-                    if (count <= BoyanMenu.varySeq.size()) {
-                        for (int i = 0; i < count; i++) {
-                            String code = BoyanMenu.varySeq.get(i);
-                            writer.append(code + "\n");
-                        }
-                    }
-                    else {
-                        writer.close();
-                        throw new IOException("Count is more than number of codes.");
-                    }
-                }
-                writer.close();
-                stage.close();
-            }
-        }
+        saveCodes(List.copyOf(BoyanMenu.varySeq));
+    }
 
-        catch(IOException e) {
-            final Alert select = new Alert(AlertType.ERROR);
-            String message = "Code sequences not saved.";
-            final String detail = e.getMessage();
-            if (detail != null && !detail.isEmpty()) {
-                message += "\n" + detail;
-            }
-            select.setContentText(message);
-            select.show();
+    private void saveCodes(final List<String> codes) {
+        // abdul 27/07/2026 [snapshot and validate path/count before atomically appending the requested result prefix]
+        try {
+            final Path destination = SaveV3FileService.parseDestination(saveToField.getText());
+            final int requestedCount = SaveV3FileService.parseCount(countField.getText(), codes.size());
+            SaveV3FileService.appendPrefixAtomically(destination, codes, requestedCount);
+            rememberSuccessfulDestination(destination, requestedCount);
+            stage.close();
+        } catch (final IllegalArgumentException | IOException exception) {
+            showFileError("Code sequences not saved.", exception);
         }
     }
 
     private void clear() {
+        // abdul 27/07/2026 [resolve clear from the visible field and atomically replace only that selected destination]
         try {
-            if (!location.endsWith(".txt")) {
-                final Alert select = new Alert(AlertType.ERROR);
-                select.setContentText("File not selected.");
-                select.show();
-            } else {
-                defaultLocation = location;
-                File toSave = new File(location);
-                FileWriter writer = new FileWriter(location, false);
-                writer.close();
-                stage.close();
-            }
-
-        }
-        catch (IOException e){
-            final Alert select = new Alert(AlertType.ERROR);
-            String message = "Code sequences not saved.";
-            final String detail = e.getMessage();
-            if (detail != null && !detail.isEmpty()) {
-                message += "\n" + detail;
-            }
-            select.setContentText(message);
-            select.show();
+            final Path destination = SaveV3FileService.parseDestination(saveToField.getText());
+            SaveV3FileService.clearAtomically(destination);
+            rememberSuccessfulDestination(destination, count);
+            stage.close();
+        } catch (final IllegalArgumentException | IOException exception) {
+            showFileError("File not cleared.", exception);
         }
     }
 
+    // abdul 27/07/2026 [remember path and count only after the staged replacement succeeds]
+    private void rememberSuccessfulDestination(final Path destination, final int requestedCount) {
+        location = destination.toString();
+        defaultLocation = location;
+        count = requestedCount;
+        saveToField.setText(location);
+    }
+
+    // abdul 27/07/2026 [keep validation and I/O failures visible without closing the export window]
+    private void showFileError(final String summary, final Exception exception) {
+        final Alert select = new Alert(AlertType.ERROR);
+        String message = summary;
+        final String detail = exception.getMessage();
+        if (detail != null && !detail.isEmpty()) {
+            message += "\n" + detail;
+        }
+        select.setContentText(message);
+        select.show();
+    }
 }

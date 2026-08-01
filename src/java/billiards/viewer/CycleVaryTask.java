@@ -72,7 +72,6 @@ public final class CycleVaryTask extends Task<ObservableList<Storage>> implement
     private volatile double imgWidth;
     private volatile double imgHeight;
     private volatile boolean gracefulCancelRequested = false;
-
     @Override
     public void requestGracefulCancel() {
         this.gracefulCancelRequested = true;
@@ -140,7 +139,11 @@ public final class CycleVaryTask extends Task<ObservableList<Storage>> implement
             try {
                 localCodes = autoCodesFiltered(coord, shotExecutor);
             } catch(RuntimeException e) {
-                if(this.gracefulCancelRequested || this.isCancelled() || Thread.interrupted()) {
+                // abdul 31/07/2026 [stop CycleVary normally when queued native work observes the operation latch]
+                if(e instanceof CancellationException
+                        || this.gracefulCancelRequested
+                        || this.isCancelled()
+                        || Thread.interrupted()) {
                     break;
                 } else {
                     System.err.println("Terminating because of uncaught exception when finding codeSet");
@@ -347,22 +350,27 @@ public final class CycleVaryTask extends Task<ObservableList<Storage>> implement
             System.out.println("//Cancel detected before loadStorage");
             return Either.left("");
         }
-        // Load from database if code already exists. If not, calculate
-        final Optional<Storage> opt = Database.loadStorage(classCodeSeq, this.pool);
+        // abdul 31/07/2026 [load every valid CycleVary candidate and propagate an unexpected native MRR failure]
+        final Optional<Storage> loaded = Database.loadStorage(classCodeSeq, this.pool);
         // Check to see if cancel was called
         if(this.isCancelled() || Thread.interrupted()) {
             Thread.currentThread().interrupt();
             System.out.println("//Cancel detected after loadStorage");
             return Either.left("");
         }
-        if (opt.isPresent()) {
-            final Storage storage = opt.get();
-            // Update partialResults on the application thread in order to enforce thread safety
-            Platform.runLater(() -> this.partialResults.get().add(storage));
+        if (loaded.isPresent()) {
+            final Storage storage = loaded.get();
+            // abdul 28/07/2026 [block CycleVary partial publication queued before application shutdown cancellation]
+            if (!this.isCancelled()) {
+                Platform.runLater(() -> {
+                    if (!this.isCancelled()) {
+                        this.partialResults.get().add(storage);
+                    }
+                });
+            }
             return Either.right(storage);
-        } else {
-            return Either.left("//empty set " + classCodeSeq);
         }
+        return Either.left("//empty set " + classCodeSeq);
     }
 
     // These expose partialResults to the FX application thread

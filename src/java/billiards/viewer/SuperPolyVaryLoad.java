@@ -7,6 +7,8 @@ import org.eclipse.collections.api.list.MutableList;
 import org.eclipse.collections.impl.list.mutable.FastList;
 
 import java.util.Optional;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 
 import billiards.geometry.ConvexPolygon;
 import javafx.geometry.Insets;
@@ -94,44 +96,29 @@ public class SuperPolyVaryLoad {
 	private final TextField magnifyTextField = new TextField();
     
     private Optional<Tuple7<ConvexPolygon, Integer, Integer, Integer, Integer, Integer, Integer>> result;
+    private final Path settingsPath;
+    private SuperPolyVarySettings settings;
     
     public SuperPolyVaryLoad(final String windowTitle, final String buttonText, final String fileName, final String boundsFileName, final String stepFileName) {
     	polygonString = Utils.readFromFile(fileName);
-    	String[] boundTokens = Utils.readFromFile(boundsFileName).trim().split(" ");
-    	String[] stepTokens = Utils.readFromFile(stepFileName).trim().split(" ");
-    	if (boundTokens.length >= 9) {
-    		try {
-    			BoundCSstep = Integer.parseInt(boundTokens[6]);
-    			BoundOSOstep = Integer.parseInt(boundTokens[7]);
-    			BoundOSNOstep = Integer.parseInt(boundTokens[8]);
-    		} catch (NumberFormatException e) {
-    			BoundCSstep = 0;
-    			BoundOSOstep = 0;
-    			BoundOSNOstep = 0;
-    		}
-    	}
-    	if (boundTokens.length >= 6) {
-    		try {
-    			BoundCSMaxSS = Integer.parseInt(boundTokens[3]);
-    			BoundOSOMaxSS = Integer.parseInt(boundTokens[4]);
-    			BoundOSNOMaxSS = Integer.parseInt(boundTokens[5]);
-    		} catch (NumberFormatException e) {
-                BoundCSMaxSS = 222;
-                BoundOSOMaxSS = 222;
-                BoundOSNOMaxSS = 222;
-    		}
-    	}
-    	if (stepTokens.length >= 3) {
-    		try {
-    			BoundCSstep = Integer.parseInt(boundTokens[0]);
-    			BoundOSOstep = Integer.parseInt(boundTokens[1]);
-    			BoundOSNOstep = Integer.parseInt(boundTokens[2]);
-    		} catch (NumberFormatException e) {
-    			BoundCSstep = 0;
-    			BoundOSOstep = 0;
-    			BoundOSNOstep = 0;
-    		}
-    	}
+        // abdul 27/07/2026 [use a dedicated complete schema and import legacy files only when it is absent]
+        this.settingsPath = Paths.get(boundsFileName).toAbsolutePath()
+                .resolveSibling("SuperPolyVaryRequest.v1.properties");
+        this.settings = SuperPolyVarySettingsStore.load(
+                settingsPath, Paths.get(boundsFileName),
+                Paths.get(stepFileName));
+        BoundCSMax = settings.csMaximum();
+        BoundOSOMax = settings.osoMaximum();
+        BoundOSNOMax = settings.osnoMaximum();
+        BoundCSMaxSS = settings.csSideSumMaximum();
+        BoundOSOMaxSS = settings.osoSideSumMaximum();
+        BoundOSNOMaxSS = settings.osnoSideSumMaximum();
+        BoundCSstep = settings.csStep();
+        BoundOSOstep = settings.osoStep();
+        BoundOSNOstep = settings.osnoStep();
+        Reps = settings.repetitions();
+        ColorCycle = settings.colorCycle();
+        AutoCover = settings.autoCover();
 
     	stage.setScene(scene);
     	stage.setTitle(windowTitle);
@@ -207,7 +194,8 @@ public class SuperPolyVaryLoad {
 
 		autoSmallCoverBox.setIndeterminate(false);
 		autoSmallCoverBox.setAllowIndeterminate(false);
-		autoSmallCoverBox.setSelected(false);
+        // abdul 28/07/2026 [restore every persisted Super toggle and magnification value into the next dialog generation]
+		autoSmallCoverBox.setSelected(settings.autoSmallCover());
 
     	instructHBox.getChildren().add(instruct);
 
@@ -231,9 +219,11 @@ public class SuperPolyVaryLoad {
 		// Zhao Yu Li, Jul 8, 2025.
 		// Optional magnification after every rep, and arbitrary magnification
 		magnifyTextField.setPrefColumnCount(3);
-		magnifyTextField.setText("2");
+		magnifyTextField.setText(
+                Double.toString(settings.magnification()));
 
 		magnifyCheckBox.setText("Magnification:");
+        magnifyCheckBox.setSelected(settings.magnify());
 
 		HBox magnifyHBox = new HBox(10, magnifyCheckBox, magnifyTextField);
 		magnifyHBox.setAlignment(Pos.CENTER_LEFT);
@@ -252,6 +242,8 @@ public class SuperPolyVaryLoad {
     	loadButton.setText(buttonText);
     	Utils.colorButton(loadButton, Color.SKYBLUE, Color.GOLD);
     	loadButton.setOnAction(event -> {
+            // abdul 27/07/2026 [clear stale dialog output and validate the complete schedule before publication]
+            this.result = Optional.empty();
             ColorCycle = colorCycleBox.isSelected();
             AutoCover = autoCoverBox.isSelected();
     		try {
@@ -265,7 +257,16 @@ public class SuperPolyVaryLoad {
     			BoundCSstep = Integer.parseInt(CSstepbox.getText().trim());
             	BoundOSOstep = Integer.parseInt(OSOstepbox.getText().trim());
             	BoundOSNOstep = Integer.parseInt(OSNOstepbox.getText().trim());
-    		} catch (NumberFormatException e) {
+                settings = new SuperPolyVarySettings(
+                        BoundCSMax, BoundOSOMax, BoundOSNOMax,
+                        BoundCSMaxSS, BoundOSOMaxSS, BoundOSNOMaxSS,
+                        BoundCSstep, BoundOSOstep, BoundOSNOstep, Reps,
+                        ColorCycle, AutoCover,
+                        autoSmallCoverBox.isSelected(),
+                        magnifyCheckBox.isSelected(),
+                        Double.parseDouble(
+                                magnifyTextField.getText().trim()));
+            } catch (IllegalArgumentException e) {
     			final Alert alert = new Alert(AlertType.ERROR);
         		alert.setTitle("AutoPolyVary Error");
         		alert.setHeaderText("Non-integer value in input box");
@@ -277,15 +278,21 @@ public class SuperPolyVaryLoad {
     		final String lines = cleanPolygon(polygonString);
     		final ConvexPolygon poly = createConvexPolygon(lines);
         	this.result = Optional.of(Tuple.of(poly, BoundCSMax, BoundOSOMax, BoundOSNOMax, BoundCSMaxSS, BoundOSOMaxSS, BoundOSNOMaxSS));
-        	//Utils.writeToFile(fileName, polygonString);
-        	Utils.writeToFile(boundsFileName, String.format("%d %d %d %d %d %d %d %d %d", BoundCSMax, BoundOSOMax, BoundOSNOMax, BoundCSMaxSS, BoundOSOMaxSS, BoundOSNOMaxSS, BoundCSstep, BoundOSOstep, BoundOSNOstep));
+            SuperPolyVarySettingsStore.save(settingsPath, settings);
         	stage.close();
     	});
     }
     
     public Optional<Tuple7<ConvexPolygon, Integer, Integer, Integer, Integer, Integer, Integer>> getLoad() {
+        // abdul 27/07/2026 [prevent a failed or closed dialog from returning a prior generation]
+        this.result = Optional.empty();
     	stage.showAndWait();
     	return this.result;
+    }
+
+    // abdul 28/07/2026 [publish the same validated settings generation that the dialog persisted]
+    public SuperPolyVarySettings getSettingsSnapshot() {
+        return settings;
     }
 
     public void close() {

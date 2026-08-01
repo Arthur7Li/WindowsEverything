@@ -196,6 +196,11 @@ Xmx = 6g
 MaxDirectMemorySize = 2g
 ```
 
+The Windows `jpackage` launcher uses these same defaults as of 2026-07-31.
+Application startup prints its JVM input arguments and effective maximum heap;
+use that output to detect a direct `java -jar` launch that omitted the launcher
+settings.
+
 Temporary Gradle property override:
 
 ```powershell

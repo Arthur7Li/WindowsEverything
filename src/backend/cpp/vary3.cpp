@@ -17,13 +17,30 @@ const float64_t OFFSET = 0.000005;
    */
 
 
+/**
+ * @brief Traverses the three-parameter Vary search tree and appends all requested billiard codes.
+ * @param min Minimum move depth accepted by the traversal.
+ * @param max Maximum move depth explored by the traversal.
+ * @param specMin Lower initial beam parameter used by descendant frames.
+ * @param specMax Upper initial beam parameter used by descendant frames.
+ * @param initPosition Fixed initial-position coordinate for the Vary3 search.
+ * @param sideSum Mutable traversal accumulator owned by the caller for this invocation.
+ * @param billiard Initial triangle billiard copied into the root frame.
+ * @param code Mutable depth-first code buffer borrowed for the duration of the call.
+ * @param codesFound Caller-owned output collection receiving complete codes.
+ * @param reqType Requested code-type encoding copied into this call.
+ * @return Nothing; results are appended to @p codesFound.
+ * @throws std::runtime_error When traversal, unfolding, or classification invariants fail.
+ * @invariant A cancel request remains true until the exclusive Java operation explicitly starts a fresh generation.
+ * @note The function owns and joins its native worker pool before returning.
+ */
+// abdul 31/07/2026 [stop Vary3 from erasing a cancel request when a call leaves the Java admission queue]
 void iterateFireAway3(
     int32_t min, int32_t max, float64_t specMin, float64_t specMax, float64_t initPosition,
     SideSum& sideSum, TriangleBilliard billiard,
     std::vector<int32_t>& code,
     std::vector<std::vector<int32_t>>& codesFound, std::string reqType)
 {
-	cancel_flag().store(false,  std::memory_order_relaxed); 
     // store data in each level
     struct Frame {
         float64_t specMin;
@@ -68,7 +85,8 @@ void iterateFireAway3(
 		
 
 			while (!stack.empty()) {
-                if (cancel_flag().load(std::memory_order_relaxed)) {
+                // Observe the operation-level release store before scheduling another Vary3 branch.
+                if (cancel_flag().load(std::memory_order_acquire)) {
                     std::cout << "C++ Vary3 Canceling" << std::endl;
 					pool.stop();
                     pool.join();

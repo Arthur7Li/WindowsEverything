@@ -3,6 +3,7 @@ package billiards.viewer;
 import billiards.codeseq.ClassifiedCodeSequence;
 import billiards.codeseq.CodeType;
 import billiards.codeseq.Storage;
+import billiards.cover.CoverTriple;
 import billiards.database.Database;
 import billiards.wrapper.ConnectionPool;
 import javafx.application.Platform;
@@ -59,11 +60,12 @@ public final class DrawPictureTaskTriples extends Task<Array<Storage[]>> impleme
     }
 
     public DrawPictureTaskTriples(
-        final Array<ClassifiedCodeSequence[]> triples,
+        final Array<CoverTriple> triples,
         final ConnectionPool pool, final ExecutorService executor, boolean print, boolean detailed) {
         this.print = print;
         this.detailed = detailed;
         this.executor = executor;
+        // abdul 27/07/2026 [accept only prevalidated cover triples before storage calculation]
         this.tasks = triples.map(triple -> () -> {
             // Respect cancellation before entering the native/database path.
             // Queued triple work should not start after the user cancels the
@@ -73,7 +75,7 @@ public final class DrawPictureTaskTriples extends Task<Array<Storage[]>> impleme
             }
             ArrayList<Either<String, Storage>> results = new ArrayList<>();
 
-            for (ClassifiedCodeSequence classCodeSeq : triple) {
+            for (ClassifiedCodeSequence classCodeSeq : triple.codes()) {
                 if (this.gracefulCancelRequested || this.isCancelled() || Thread.currentThread().isInterrupted()) {
                     break;
                 }
@@ -196,7 +198,10 @@ public final class DrawPictureTaskTriples extends Task<Array<Storage[]>> impleme
                         this.updateProgress(progress, todo);
                     }
 
-                    storages.add(storageTriple);
+                    // abdul 27/07/2026 [discard incomplete calculations before they reach proof-artifact publication]
+                    if (CoverTriple.fromStorages(storageTriple).isPresent()) {
+                        storages.add(storageTriple);
+                    }
                 } catch (final ExecutionException e) {
                     // One of the futures threw an exception during its calculation,
                     // so we need to cancel the rest of the futures

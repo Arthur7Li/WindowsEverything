@@ -695,63 +695,158 @@ public final class Utils {
     }
 
 
-    public static boolean verifyInfo(InfoAll infoAll, Storage storage) {
+    public static ValidationStatus verifyInfo(
+            final InfoAll infoAll, final Storage storage) {
+        try {
+            final ImmutableList<Vector2> points =
+                    Database.parsePoints(storage.points);
+            // abdul 27/07/2026 [validate the native equation fields and preserve uncertainty instead of accepting empty LR metadata]
+            return validateReconstructedRegion(
+                    infoAll.sinEquations, infoAll.cosEquations, points);
+        } catch (final RuntimeException exception) {
+            return ValidationStatus.INCONCLUSIVE;
+        }
+    }
 
-        String pointsStr = storage.points;
-        // TODO George, fix copy
-        String sin = infoAll.leftRights;
-        String cos = infoAll.codeSeqLR;
-        //String sin = infoAll.sinEquations;
-        //String cos = infoAll.cosEquations;
-        //double epsilon = 1E-8;
-        double epsilon = 1E-10;
-
-        // parse
-        ImmutableList<Vector2> points = Database.parsePoints(pointsStr);
-        final String[] sinEquations = StringUtils.split(sin, '\n');
-        final String[] cosEquations = StringUtils.split(cos, '\n');
-        //
-        for (Vector2 point : points) {
-            //sin
-            for (final String sinEquation : sinEquations) {
-                final String[] stringCoeffs = StringUtils.split(sinEquation, ' ');
-                double sum = 0;
-                final double[] coeffs = new double[3];
-                for (int i = 0; i < stringCoeffs.length; ++i) {
-                    coeffs[i % 3] = Double.parseDouble(stringCoeffs[i]);
-                    if (i % 3 == 2) {
-                        double temp = coeffs[0] * Math.sin(coeffs[1] * point.x + coeffs[2] * point.y);
-                        sum += temp;
-                    }
-                }
-                //System.out.println(storage.classCodeSeq + " sin : "+ coeffs[0] +" "+ coeffs[1] +" "+ coeffs[2]);
-
-                //System.out.println(storage.classCodeSeq + " sin : " + Double.toString(sum));
-
-                if (sum < 0 && Math.abs(sum) > epsilon) {
-                    return false;
-                }
-
+    static ValidationStatus validateReconstructedRegion(
+            final String sinText,
+            final String cosText,
+            final Iterable<Vector2> pointsIterable) {
+        final ArrayList<Vector2> points = new ArrayList<>();
+        for (final Vector2 point : pointsIterable) {
+            if (point == null || !Double.isFinite(point.x)
+                    || !Double.isFinite(point.y)) {
+                return ValidationStatus.INCONCLUSIVE;
             }
-            //cos
-            for (final String cosEquation : cosEquations) {
-                final String[] stringCoeffs = StringUtils.split(cosEquation, ' ');
-                double sum = 0;
-                final double[] coeffs = new double[3];
-                for (int i = 0; i < stringCoeffs.length; ++i) {
-                    coeffs[i % 3] = Double.parseDouble(stringCoeffs[i]);
-                    if (i % 3 == 2) {
-                        double temp = coeffs[0] * Math.cos(coeffs[1] * point.x + coeffs[2] * point.y);
-                        sum += temp;
-                    }
+            points.add(point);
+        }
+        if (points.isEmpty()) {
+            return ValidationStatus.INCONCLUSIVE;
+        }
+
+        final ArrayList<ParsedTrigInequality> equations =
+                new ArrayList<>();
+        if (!parseTrigInequalities(sinText, true, equations)
+                || !parseTrigInequalities(cosText, false, equations)
+                || equations.isEmpty()) {
+            return ValidationStatus.INCONCLUSIVE;
+        }
+
+        double centerX = 0.0;
+        double centerY = 0.0;
+        for (final Vector2 point : points) {
+            centerX += point.x;
+            centerY += point.y;
+        }
+        centerX /= points.size();
+        centerY /= points.size();
+        double radius = 0.0;
+        for (final Vector2 point : points) {
+            radius = Math.max(radius, Math.hypot(
+                    point.x - centerX, point.y - centerY));
+        }
+
+        for (final ParsedTrigInequality equation : equations) {
+            final double tolerance =
+                    1e-10 * Math.max(1.0, equation.coefficientMagnitude);
+            for (final Vector2 point : points) {
+                final double value = equation.evaluate(point.x, point.y);
+                if (!Double.isFinite(value)) {
+                    return ValidationStatus.INCONCLUSIVE;
                 }
-                //System.out.println(storage.classCodeSeq + " cos : " + Double.toString(sum));
-                if (sum < 0 && Math.abs(sum) > epsilon) {
-                    return false;
+                if (value < -tolerance) {
+                    return ValidationStatus.INVALID;
                 }
+            }
+
+            final double centerValue =
+                    equation.evaluate(centerX, centerY);
+            final double lowerBound =
+                    centerValue - equation.lipschitz * radius;
+            if (!Double.isFinite(lowerBound)
+                    || lowerBound <= tolerance) {
+                return ValidationStatus.INCONCLUSIVE;
             }
         }
-        return true;
+        // abdul 27/07/2026 [a Lipschitz disk bound proves every inequality over the complete point hull]
+        return ValidationStatus.VALID;
+    }
+
+    private static boolean parseTrigInequalities(
+            final String text,
+            final boolean sine,
+            final ArrayList<ParsedTrigInequality> output) {
+        if (text == null || text.isBlank()) {
+            return true;
+        }
+        final String[] lines = text.trim().split("\\R");
+        try {
+            for (final String line : lines) {
+                final String[] tokens = line.trim().split("\\s+");
+                if (tokens.length == 0 || tokens.length % 3 != 0) {
+                    return false;
+                }
+                final double[] coefficients =
+                        new double[tokens.length];
+                double magnitude = 0.0;
+                double lipschitz = 0.0;
+                for (int index = 0; index < tokens.length;
+                        index += 3) {
+                    final double amplitude =
+                            Double.parseDouble(tokens[index]);
+                    final double xFrequency =
+                            Double.parseDouble(tokens[index + 1]);
+                    final double yFrequency =
+                            Double.parseDouble(tokens[index + 2]);
+                    if (!Double.isFinite(amplitude)
+                            || !Double.isFinite(xFrequency)
+                            || !Double.isFinite(yFrequency)) {
+                        return false;
+                    }
+                    coefficients[index] = amplitude;
+                    coefficients[index + 1] = xFrequency;
+                    coefficients[index + 2] = yFrequency;
+                    magnitude += Math.abs(amplitude);
+                    lipschitz += Math.abs(amplitude)
+                            * Math.hypot(xFrequency, yFrequency);
+                }
+                output.add(new ParsedTrigInequality(
+                        sine, coefficients, magnitude, lipschitz));
+            }
+            return true;
+        } catch (final NumberFormatException exception) {
+            return false;
+        }
+    }
+
+    private static final class ParsedTrigInequality {
+        private final boolean sine;
+        private final double[] coefficients;
+        private final double coefficientMagnitude;
+        private final double lipschitz;
+
+        private ParsedTrigInequality(
+                final boolean sine,
+                final double[] coefficients,
+                final double coefficientMagnitude,
+                final double lipschitz) {
+            this.sine = sine;
+            this.coefficients = coefficients;
+            this.coefficientMagnitude = coefficientMagnitude;
+            this.lipschitz = lipschitz;
+        }
+
+        private double evaluate(final double x, final double y) {
+            double value = 0.0;
+            for (int index = 0; index < coefficients.length;
+                    index += 3) {
+                final double angle = coefficients[index + 1] * x
+                        + coefficients[index + 2] * y;
+                value += coefficients[index]
+                        * (sine ? Math.sin(angle) : Math.cos(angle));
+            }
+            return value;
+        }
     }
     // this function is from https://stackoverflow.com/a/41434490
     static private String convertDecimalToFraction(double x){

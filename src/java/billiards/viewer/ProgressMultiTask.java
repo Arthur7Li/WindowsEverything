@@ -56,6 +56,8 @@ public final class ProgressMultiTask {
         // IMPORTANT: This progress must be closed from the enclosing scope, not from here.
         stage.setOnCloseRequest(event -> {
             cancelled = true;
+            // abdul 31/07/2026 [signal native work even when the user closes the multi-task progress window]
+            Wrapper.requestVaryCancellation();
             if(boundTask) requestCancel(this.task);
             //stage.close();
         });
@@ -71,7 +73,8 @@ public final class ProgressMultiTask {
         cancelButton.setText("Cancel");
         cancelButton.setOnAction(event -> {
             cancelled = true;
-            Wrapper.backend_cancel();
+            // abdul 31/07/2026 [latch cancellation so the next queued native call cannot reset and resume the run]
+            Wrapper.requestVaryCancellation();
             if(boundTask) requestCancel(this.task);
             //stage.close();
         });

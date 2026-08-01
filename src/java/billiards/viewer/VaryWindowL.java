@@ -232,6 +232,8 @@ public final class VaryWindowL {
         loadButton.setText(buttonText);
         Utils.colorButton(loadButton, Color.SKYBLUE, Color.GOLD);
         loadButton.setOnAction(event -> {
+            // abdul 27/07/2026 [clear the generation result before validation so failures cannot reuse stale work]
+            this.result = Optional.empty();
             Override = overrideBox.isSelected();
             Draw = drawCB.isSelected();
             AutoCover =autoCoverBox.isSelected();
@@ -257,11 +259,28 @@ public final class VaryWindowL {
             final String[] lines = cleaned.split("\n");
             final MutableList<Vector2> pointList = new FastList<>();
 
-            for (final String line : lines) {
-                final String[] coords = line.split(" ");
-                final double x = Double.parseDouble(coords[0]);
-                final double y = Double.parseDouble(coords[1]);
-                pointList.add(Vector2.create(x, y));
+            // abdul 28/07/2026 [reject malformed, non-finite, or out-of-domain coordinate rows before publishing a Vary generation]
+            try {
+                for (final String line : lines) {
+                    final String[] coords = line.trim().split("\\s+");
+                    if (coords.length != 2) {
+                        throw new NumberFormatException();
+                    }
+                    final double x = Double.parseDouble(coords[0]);
+                    final double y = Double.parseDouble(coords[1]);
+                    if (!Double.isFinite(x) || !Double.isFinite(y)) {
+                        throw new NumberFormatException();
+                    }
+                    pointList.add(Vector2.create(x, y));
+                }
+            } catch (final NumberFormatException exception) {
+                final Alert alert = new Alert(AlertType.ERROR);
+                alert.setTitle("VaryL Error");
+                alert.setHeaderText("Invalid coordinate");
+                alert.setContentText(
+                        "Enter one finite x y coordinate on each line.");
+                alert.showAndWait();
+                return;
             }
             this.result = Optional.of(Tuple.of(pointList, BoundCSMax, BoundOSOMax, BoundOSNOMax, BoundCSMaxSS, BoundOSOMaxSS, BoundOSNOMaxSS));
             Utils.writeToFile(fileName, fullContent);
@@ -350,11 +369,31 @@ public final class VaryWindowL {
     public Optional<Tuple7<MutableList<Vector2>, Integer, Integer, Integer, Integer, Integer, Integer>> 
     	   getPoints(final String x, final String y, final boolean onePoint) {
     	if (onePoint) {
-    		fullContent = x + " " + y;
-            text.setText(fullContent);
-            loadButton.fire();
+            // abdul 27/07/2026 [construct one-point work without mutating or saving the user's multi-point list]
+            this.result = Optional.empty();
+            try {
+                final double pointX = Double.parseDouble(x);
+                final double pointY = Double.parseDouble(y);
+                if (!Double.isFinite(pointX) || !Double.isFinite(pointY)) {
+                    return Optional.empty();
+                }
+                final MutableList<Vector2> points = new FastList<>();
+                points.add(Vector2.create(pointX, pointY));
+                return Optional.of(Tuple.of(
+                        points,
+                        Integer.parseInt(CSbox.getText().trim()),
+                        Integer.parseInt(OSObox.getText().trim()),
+                        Integer.parseInt(OSNObox.getText().trim()),
+                        Integer.parseInt(CSsbox.getText().trim()),
+                        Integer.parseInt(OSOsbox.getText().trim()),
+                        Integer.parseInt(OSNOsbox.getText().trim())));
+            } catch (final NumberFormatException exception) {
+                return Optional.empty();
+            }
     	}
     	else {
+            // abdul 27/07/2026 [give each modal invocation a fresh result generation]
+            this.result = Optional.empty();
     		stage.showAndWait();
     	}
         return this.result;
@@ -367,7 +406,12 @@ public final class VaryWindowL {
     }
 
     public boolean getOverride() {
-        return Override;
+        return overrideBox.isSelected();
+    }
+
+    // abdul 28/07/2026 [expose plain dialog values so Viewer can snapshot them before starting worker code]
+    public boolean getAutoCover() {
+        return autoCoverBox.isSelected();
     }
 
     public boolean getFirstLastSelected() {

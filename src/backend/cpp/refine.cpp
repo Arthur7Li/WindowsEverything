@@ -89,7 +89,18 @@ void print_region(const IntervalLineSegment& line_seg) {
 // the intersection using bisection instead of newton's method. Perhaps later I can look into that.
 // But for now, for simplicity, I will stick with Newton's method.
 
-// TODO go through and rewrite this using gradients
+/**
+ * @brief Refines a straight interval segment against one curve using the established endpoint-sign decision table.
+ * @tparam T Exact curve-equation representation accepted by the evaluator and gradient helpers.
+ * @param line_segment Input segment and its endpoint boundary equations; borrowed for this call.
+ * @param curve Curve whose positive portion is retained; borrowed and never modified.
+ * @param constraint Straight supporting-line equation and gradient; borrowed and never modified.
+ * @return The retained positive subsegment, the original segment when wholly positive, or no value when wholly negative.
+ * @throws std::runtime_error When a zero-endpoint configuration is not represented by the legacy refinement table.
+ * @invariant The historical Abdul/Linux algorithm assumes equal nonzero endpoint signs extend across this small segment.
+ * @note Mathematical hidden-crossing certification is intentionally not imposed here because it rejected established valid MRRs.
+ */
+// abdul 31/07/2026 [restore the established Abdul and Linux endpoint-sign refinement contract for valid MRR segments]
 template <typename T>
 boost::optional<IntervalLineSegment> refine_line_segment(const IntervalLineSegment& line_segment, const T& curve, const EquationGradient<XY, LinComArrZ<XYEta>>& constraint) {
 
@@ -500,9 +511,17 @@ std::vector<Corner> calculate_corners(const IntervalPolygon& polygon, const T& c
     return corners;
 }
 
-// Each pair is a point, and the equation connecting it to the next point in the vector
-// We assume the curve intersects the interior of each side_equation curve segment at
-// most once
+/**
+ * @brief Clips an interval polygon against one curve using the established ordered-corner refinement table.
+ * @tparam T Exact curve-equation representation supported by corner evaluation and intersection visitors.
+ * @param polygon Ordered boundary vertices and outgoing equations; borrowed and never modified.
+ * @param curve Curve whose positive region is retained; borrowed and never modified.
+ * @return The clipped polygon, the original polygon when wholly positive, or no value when wholly negative.
+ * @throws std::runtime_error When a zero-corner topology is not represented by the legacy decision table or root isolation fails.
+ * @invariant Each polygon entry connects its point to the next entry and each small side is treated as having at most one crossing.
+ * @note Equal nonzero endpoint signs follow the proven production behavior used by Abdul Windows and the Linux release.
+ */
+// abdul 31/07/2026 [remove the experimental equal-sign rejection that broke the valid nextIter AutoPolyVary codes]
 template <typename T>
 boost::optional<IntervalPolygon> refine_polygon(const IntervalPolygon& polygon, const T& curve) {
 

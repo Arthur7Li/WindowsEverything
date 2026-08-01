@@ -1,6 +1,6 @@
 # Handbook Rewrite Work State
 
-Last updated: 2026-07-18
+Last updated: 2026-07-31
 
 ## Authority
 
@@ -9,8 +9,10 @@ Last updated: 2026-07-18
 - Reproducible reader editions: `tools/docs/build-handbook.ps1` generates the
   ignored `build/handbook/CODEBASE-HANDBOOK.html` and `.pdf` artifacts.
 - Source baseline: branch `main`, commit
-  `d2a8e6939807b9053f77596b22d005a3ebe111a0`, plus the currently documented
-  uncommitted concurrency/test/tooling work.
+  `0d2be2093bed5b4673b855123f1ff8ce16d2fa20`, plus the uncommitted
+  evidence-first and critical-repair campaigns documented in
+  `docs/release/EVIDENCE-FIRST-REPAIRS-2026-07-27.md` and
+  `docs/release/CRITICAL-REPAIR-CHECKPOINT-2026-07-27.md`.
 - Coverage ledger: `docs/handbook/coverage.csv`.
 - Generated inventories: `build/doc-audit/`; they are evidence, not prose.
 
@@ -24,35 +26,36 @@ must be grouped with a written rationale.
 
 ## Current Gate
 
-- Gate: 10, full explanatory audit and sampled source-to-book review.
-- Status: completed for the current 4,063-symbol production inventory.
-- Current authoritative checkpoint: handbook Sections 14.125 through 14.181
-  complete `Viewer.java`, all remaining native sources and headers, exact
-  geometry, native XYZ, the residual Java code/storage generic signatures, the
-  dormant/active Java Cover models, the complete active Cover artifact parser,
-  Java database administration, and the two legacy Picture carriers. The
-  Doxygen-enabled 2026-07-18 audit is 4,063 / 4,063 production symbols (100%):
-  2,793 reviewed entries plus 1,270 justified trivial groupings, with 66
-  excluded inventory rows and zero explanatory gaps. Recent findings extend
-  through BUG-284 and OPT-026. No production or test source was changed by this
-  handbook continuation.
-- Completed layers: Gates 1-10 now cover mathematical vocabulary, code-number
+- Gate: 11, critical-repair integration and complete source re-audit.
+- Status: completed for the current 4,310-symbol production inventory.
+- Current authoritative checkpoint: handbook Sections 14.182 through 14.190
+  explain the repaired exact-gradient and intersection certificates,
+  operation lifetime and terminal publication, immutable search requests,
+  typed reconstructed-storage validation, Cover triple/artifact transactions,
+  committed camera/raster rendering, Save V3 staging, disabled updater, and
+  performance constraints, `nextIter` MRR compatibility, native-Vary cancellation, observable JVM
+  settings, and the unified PatternFinder worker budget. The Doxygen-enabled 2026-07-31 audit is
+  4,310 / 4,310 production symbols (100%): 2,951 reviewed entries plus 1,359
+  justified trivial groupings, with 143 support-test rows excluded and zero
+  explanatory gaps.
+- Completed layers: Gates 1-11 now cover mathematical vocabulary, code-number
   effects, Pattern/Expando, symbolic equations, unfolding, bounding and
   refinement, proof/cover/triples/Vary/database/JNA/concurrency, Java/UI
-  pipeline dossiers, every remaining source-order symbol, and the final
-  explanatory/quality audit.
-- Historical checkpoints from Sections 14.28-14.177 remain useful provenance,
-  but none is the resume boundary. The only authoritative continuation state
-  is the zero-gap Section 14.181 checkpoint above.
+  pipeline dossiers, every remaining source-order symbol, the final
+  explanatory/quality audit, and the July critical repair.
+- Historical checkpoints from Sections 14.28-14.181 remain useful provenance,
+  but none is the resume boundary. The authoritative handbook continuation
+  state is the zero-gap Section 14.189 checkpoint above. The wider code-repair
+  continuation state remains the critical-repair checkpoint file.
 - Next exact unresolved source boundary: none in the current explanatory
   inventory. A resumed handbook task should start with reader-driven editorial
   revision or a source change that makes ledger hashes stale, not another blind
   symbol pass. The later instructions PDF remains a separate agenda item.
 - Preserve the distinction between mathematical empty, disproved, verified,
   unsupported, cancelled, and backend failure across C++/JNA/Java.
-- Production code/test changes are user-authorized, but the completed handbook
-  pass intentionally changed documentation/ledgers only; source findings are
-  recorded in the bug register before any separate implementation pass.
+- Production and test changes in the repair campaign are user-authorized and
+  source-evidenced. Keep the live bug register and release reports synchronized
+  before declaring the campaign complete.
 
 ## Gate Order
 
@@ -69,16 +72,22 @@ must be grouped with a written rationale.
 9. Minimal Java/UI semantic pointers and end-to-end pipeline dossiers.
    **Completed.**
 10. Full explanatory audit and sampled human review. **Completed.**
+11. July critical-repair integration and complete affected-file re-review.
+    **Completed.**
 
 ## Final Quality Gate
 
-- Inventory audit with Doxygen: 4,063 / 4,063, zero gaps.
-- Ledger arithmetic: 2,793 `reviewed` + 1,270 `grouped-trivial` = 4,063;
-  66 nonproduction rows are excluded.
+- Inventory audit with Doxygen: 4,310 / 4,310, zero gaps.
+- Ledger arithmetic: 2,951 `reviewed` + 1,359 `grouped-trivial` = 4,310;
+  143 nonproduction support-test rows are excluded.
+- Inventory and ledger identity: 4,453 rows and 4,453 unique IDs. `DOC-004`
+  assigns source-order ordinal suffixes to the 55 Ctags rows in 20 apparent-ID
+  collision groups and makes either inventory or ledger duplication fatal.
 - Sampled source-to-book review covered symbolic math, refinement, cover
   recursion, native ABI ownership, Java Storage, cancellation/progress,
-  Viewer workflows, dormant prototypes, exact geometry, Cover artifacts, and
-  database administration.
+  Viewer workflows, dormant prototypes, exact geometry, Cover artifacts,
+  database administration, and every source file changed by the critical
+  repair.
 - The sample found and corrected the exact slash/space behavior in
   `CoverStuff` prose. It also normalized 120 corrupted/curly quote sequences;
   the handbook now contains zero non-ASCII and zero mojibake characters.
@@ -88,9 +97,9 @@ must be grouped with a written rationale.
   `triangle_billiard4.cpp`). They are retained in
   `build/doc-audit/doxygen-warnings.log`; the source/ctags ledger remains the
   authority for those template specializations.
-- `bug-register.csv` parses as 318 unique rows and ends at BUG-284. Every bug,
-  optimization, and architecture ID referenced by the handbook exists in the
-  register; BUG-281 through BUG-284 were added during the final Java pass.
+- The live `bug-register.csv` remains the authority for resolution status.
+  Re-run its uniqueness/reference checks after the critical rows and
+  performance follow-up are finalized; do not reuse an existing ID.
 - A direct handbook whitespace scan finds only four intentional trailing-space
   lines: two Markdown hard breaks in the header and two literal trailing-space
   examples in the native Vary transport grammar. Existing unrelated dirty
@@ -107,28 +116,33 @@ must be grouped with a written rationale.
   print layout with a title page, two-column contents, portable Courier New
   code text, wrapped code blocks, tables, MathML, internal destinations, and
   print-safe page-break rules.
-- The 2026-07-18 build used Pandoc 3.10 and Headless Chrome 150. It produced a
-  2,315,561-byte self-contained HTML file and a 10,850,560-byte, tagged,
-  unencrypted, 429-page PDF 1.4 with letter pages and a document outline.
-- Validation: the full builder exited zero; Pandoc reported no math warnings;
-  the HTML contains 410 MathML nodes; `pdfinfo` and `pdftotext` parsed the PDF;
-  `pdftoppm` raster checks covered the title, system map, symbolic math,
-  refinement, Cover proof layer, workflow bug tables, and late Cover parser;
-  `audit-handbook.ps1 -Mode enforce` remained 4,063 / 4,063.
+- The final 2026-07-31 build used the installed Pandoc and Headless Chrome. It
+  produced a 2,407,376-byte self-contained HTML file and an 11,039,763-byte
+  PDF with a valid `%PDF-` signature. The HTML contains 421 MathML nodes.
+- Validation: the full builder exited zero after rerunning outside the
+  filesystem sandbox so Headless Chrome could write the PDF;
+  `audit-handbook.ps1 -Mode enforce` with Doxygen reached 4,310 / 4,310.
+  Doxygen retained the same 25 nonfatal template/member-matching warnings.
 - Rebuild after every reader-facing handbook edit with
   `.\tools\docs\build-handbook.ps1`. Generated HTML, PDF, extracted text, and
   raster-validation files stay below ignored `build/` and are not source.
 
 ## Resume Procedure
 
-1. Read `AGENTS.md`, this file, and `build/doc-audit/coverage.md`.
-2. Confirm `git rev-parse HEAD` and run the audit with `-SyncLedger` if source
-   signatures or files changed.
-3. Work only on the current gate; keep each gate to a coherent algorithm or one
-   to three closely related files.
-4. Update ledger classifications and statuses only after the authored entry
-   satisfies the completion contract.
-5. Record exact next symbol, unresolved questions, and validation before ending.
+1. Read `AGENTS.md`, this file,
+   `docs/release/CRITICAL-REPAIR-CHECKPOINT-2026-07-27.md`, and
+   `build/doc-audit/coverage.md`.
+2. Confirm `git rev-parse HEAD`. The documented repair baseline is
+   `0d2be2093bed5b4673b855123f1ff8ce16d2fa20`; no commit or push is authorized
+   by the campaign prompt.
+3. If production/test source changes, run the audit with `-SyncLedger`, author
+   the affected behavior, and review only the invalidated rows. Never restore
+   status solely to make the percentage pass.
+4. Preserve the user's five pre-campaign dirty paths listed in the critical
+   checkpoint and keep `BUG-166`/`BUG-168` dormant unless the user changes
+   scope.
+5. Re-run Doxygen enforcement and the reader builder after handbook edits.
+   Record exact validation and continuation state before ending.
 
 ## Evidence And Decisions
 

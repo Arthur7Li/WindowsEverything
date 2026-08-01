@@ -1,8 +1,9 @@
 # Abdul Windows Release Report
 
-Date: 2026-07-14; concurrency addendum: 2026-07-15
+Date: 2026-07-14; latest critical-repair addendum: 2026-07-28
 
-Primary source tree: Abdul Windows, `-Abdul-s-fork-BilliardsEverything`
+Primary source tree: Abdul Windows,
+`Abdul-Windows-fork-BilliardsEverything`
 
 Comparison names used in this report:
 
@@ -32,7 +33,79 @@ The most important release changes are:
 - Added an `Add to Cover` checkbox next to the existing top Calculate button.
 - Added duplicate guards so that Calculate does not insert the same cover line twice.
 - Ported or independently implemented the highest-value Nick Shan Linux fixes: numeric tolerance, Vary4 geometry typo, stale cover guard, pixel bounds guard, evaluator reuse, render batching/coalescing, DB connection ownership, code canonicalization, and pattern-finder string building.
+- Retained Krawczyk, connected-arc, unique-crossing, and hidden-crossing machinery as focused proof research without making it a production gate over established MRR inputs.
+- Added application-owned operation generations that cancel and join active Viewer workflows before native-pool destruction.
+- Added immutable Vary/Tetra/Super requests, typed reconstructed-storage validation, staged cover publication, and committed camera/raster rendering.
+- Disabled and removed the unauthenticated automatic updater.
 - Deferred database relocation because changing user data paths needs a deliberate migration plan.
+
+## 2026-07-28 Critical Repair Release State
+
+The active critical campaign is documented line by line in
+`CRITICAL-REPAIR-CHECKPOINT-2026-07-27.md`; the maintainable source contracts
+are handbook Sections 14.182 through 14.189. The live bug register marks every
+in-scope active critical row fixed after implementation and focused evidence.
+`BUG-166` and `BUG-168` remain open because the user explicitly declared Small
+Cover dormant. They were neither activated nor silently relabeled.
+
+This campaign introduced Krawczyk, connected-component, and concealed-crossing
+proof machinery and measured its behavior. The 31 July `nextIter` regression
+showed that promoting it to the production acceptance path rejected established
+MRR inputs. Production now uses the compatible full/half-segment Newton search
+with exact two-equation zero validation; the stricter machinery remains in the
+source for focused proof research and tests.
+
+The Java application now owns asynchronous work through one
+`OperationRegistry`. Exclusive workflow keys prevent overlapping VaryL,
+PolyVary, and Tetra/Bar generations. Futures and executors are registered
+before publication, terminal transitions are exactly once, queued JavaFX
+callbacks recheck the generation, and application shutdown stops admission,
+cancels, and joins workers before destroying the native pool.
+
+Search controls are snapshotted into immutable requests before background
+execution. SuperPolyVary settings use a complete versioned atomic file. The
+Tetra/Bar accumulator is generation-private. One-point VaryL no longer writes
+the multi-point coordinate file or reuses a stale result. Reconstructed
+storage validation distinguishes proved valid, proved invalid, and
+inconclusive evidence; only proved invalid permits database deletion.
+
+Cover triple input is structurally stable-unstable-stable. Cover merge writes
+and validates one sibling staging generation, records a SHA-256/size manifest,
+retains rollback, and switches live under a shared artifact lock. Rendering
+captures every camera/control/geometry input on JavaFX and commits the images
+with that copied camera and render generation. Hole scans and automatic
+sampling fail closed without a matching committed pair.
+
+The old updater could not meet authenticity or transactional installation
+requirements. The UI is disabled with manual trusted-install guidance, and
+`Updater.java` plus both root/app platform-script pairs were deleted. A future
+updater requires a new signed-manifest and rollback design. The Windows and
+macOS packagers no longer copy the deleted scripts, so installer construction
+does not fail or silently restore the removed payload.
+
+Validation completed before release documentation:
+
+- initial clean `compileJava backendSharedLibrary test testBackend`: 28 JUnit
+  tests and 44 then-current native cases, zero failures;
+- final clean gate after the new intersection fixtures: 28 JUnit tests and 47
+  native cases in 2 minutes 47 seconds, zero failures;
+- `testBackendSlow`: 47 cases and exact one/four-worker long-boundary
+  equality in 29 seconds;
+- five measured samples each at one, two, and four workers: one repaired hash
+  `9f837d3bd0c612a7`, zero correctness failures;
+- retained raw benchmark evidence:
+  `build/benchmarks/20260728-052151-reported-long-cs-mrr-baseline-unverified-skip-build/`;
+- Doxygen-enabled handbook enforcement: 4,310/4,310 production symbols;
+- unique handbook identity check: 4,453/4,453 inventory/ledger IDs after
+  `DOC-004` disambiguated explicit specializations;
+- final reader build: 2,400,967-byte embedded HTML and 11,022,806-byte PDF
+  with 421 MathML nodes.
+
+The strict proof path is slower than the historical heuristic: median wall
+time changed by +27.8%, +74.7%, and +118.2% at one, two, and four workers.
+This is tracked openly as `OPT-027`. Optimizations must preserve strict proof
+contracts and the repaired normalized payload; the slowdown is not described
+as a speed win.
 
 ## Build And Launch Summary
 
@@ -204,7 +277,7 @@ Compile passed. Manual AutoPolyVary and CycleVary edge tests remain important.
 
 Status:
 
-Still planned.
+Completed for active Viewer workflows on 2026-07-28.
 
 Files:
 
@@ -212,19 +285,31 @@ Files:
 
 Issue:
 
-Some Java tasks still need a full audit for interrupted catches, executor shutdown, cancel timing, and partial-progress preservation.
+Java tasks needed one owner for interrupted waits, executor shutdown, cancel
+timing, terminal publication, and partial-progress preservation.
 
-Why Not Fully Closed:
+Fix:
 
-Several higher-confidence correctness and memory fixes were prioritized first. Abdul Windows already has `Utils.safeShutdownExecutor` and `shutdownExecutorAsync`, so this should be audited carefully rather than blindly ported from Nick Shan Linux.
+`OperationRegistry` now owns application admission, exclusive workflow
+generations, Futures, and per-operation executors. Active Viewer workflows
+route every terminal path through an exactly-once handle and reject late
+JavaFX publication. `IterateToLimitWindow` closes its synchronous pool from
+`finally`, restores interrupts, and cancels siblings. Main joins registered
+operations before native-pool destruction.
 
-Significance:
+Scope:
 
-Medium. Mostly affects cancellation, shutdown, and long-running tasks.
+The source scan classified Boyan, Cover, Cycle, lookup, Tetra/Bar, VaryL,
+direct/Auto/Super PolyVary, code loading, merge, and render resources.
+PatternFinder is a separate program selection and was not folded into the
+Viewer lifecycle.
 
-Next Test:
+Validation:
 
-Start cover, AutoVary, CycleVary, and Vary tasks, cancel each while work is active, and confirm progress is preserved and no runaway threads remain.
+Three registry tests cover overlap, executor-retirement ownership, and
+shutdown cancellation/join. The 27-test forced critical cohort and clean
+28-test gate passed. Manual close-during-work tests remain useful for JavaFX
+interaction behavior, but no known active Viewer ownership gap remains.
 
 ### BUG-006: Viewer Shifted Down
 
@@ -766,6 +851,33 @@ Validation on 2026-07-16:
 
 The benchmark tools do not claim a performance improvement yet. A defensible result needs at least five optimized measured samples per worker count under matched metadata, plus identical correctness hashes.
 
+### 2026-07-31 `nextIter` MRR and Cancellation Repair
+
+Author: Abdul
+
+Date: 31 July 2026
+
+The three reported candidates are expected to calculate. Their failures were
+native compatibility regressions from stricter equal-sign and connected-arc
+gates, not candidates that AutoPolyVary should skip. The skip-only Java types,
+counters, and success summaries were removed. Production intersection and
+refinement now follow the established full/half-segment behavior and still
+require exact zero validation in both equations. The exact three code
+sequences pass complete slow MRR regressions.
+
+Cancel is now latched for the complete native-Vary operation. Workers cannot
+clear the flag, queued calls cannot enter native code after cancellation, all
+native-Vary workflows share one exclusive key, and both Cancel buttons and
+window close controls signal native cancellation.
+
+The Windows packaged launcher now receives the same documented JVM memory
+settings as Gradle, and startup exposes the actual JVM arguments and maximum
+heap. PatternFinder now shares the configured `--threads` budget. Structured
+native logging, pre-return native Vary streaming, and LiPattern CPU-parking
+profiling remain explicitly tracked follow-ups. Full details and the exact
+reported native regression are in
+`docs/release/NEXTITER-STABILITY-2026-07-31.md`.
+
 ## Known Remaining Risks
 
 ### Manual UI Testing Still Needed
@@ -833,6 +945,18 @@ UI:
 - Duplicate triple skipped.
 - Cover window close/reopen preserves text.
 - Main window close saves Cover/Small Cover/Stables text.
+- Start VaryL, PolyVary, CycleVary, Cover, and lookup work, then close/cancel;
+  confirm no late success/error dialog or render is published.
+- Reopen/edit SuperPolyVary while a run is active; confirm the first run keeps
+  its original schedule and options.
+- Pan/zoom during a delayed render; confirm hole finding waits for or uses the
+  matching committed camera/raster pair.
+- Inject or simulate a failed cover merge; confirm the prior live directory is
+  unchanged and a successful merge retains one rollback generation plus
+  `manifest.sha256`.
+- Confirm the update button remains disabled and no updater script is shipped.
+- Do not exercise Small Cover as a release-ready workflow; `BUG-166` and
+  `BUG-168` remain explicitly dormant.
 
 Performance:
 
@@ -841,6 +965,9 @@ Performance:
 - Watch RAM and virtual memory.
 - Run AutoVary near a zoomed/reflected edge.
 - Cancel a long AutoVary and confirm partial progress remains.
+- Use the benchmark runner at 1/2/4 workers and require repaired hash
+  `9f837d3bd0c612a7`; compare certificate timings under `OPT-027` without
+  weakening proof tests.
 
 ## Reference Docs Included
 

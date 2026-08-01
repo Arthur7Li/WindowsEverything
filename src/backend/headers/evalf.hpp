@@ -211,13 +211,14 @@ N bound(const LinComMapZ<Cos<LinComArrZ<XY>>>& equation) {
     return sum;
 }
 
-static LinComMapZ<Cos<LinComArrZ<XY>>> multiply_square(const LinComMapZ<Cos<LinComArrZ<XY>>>& equation) {
+// abdul 27/07/2026 [make header-defined polynomial helpers inline so focused certification test translation units do not emit unused-static errors]
+inline LinComMapZ<Cos<LinComArrZ<XY>>> multiply_square(const LinComMapZ<Cos<LinComArrZ<XY>>>& equation) {
 
     const auto& result =multiply_lin_com(equation, equation);
     return result;
 }
 
-static LinComMapZ<Cos<LinComArrZ<XY>>> multiply_cubic(const LinComMapZ<Cos<LinComArrZ<XY>>>& equation) {
+inline LinComMapZ<Cos<LinComArrZ<XY>>> multiply_cubic(const LinComMapZ<Cos<LinComArrZ<XY>>>& equation) {
 
     const auto& inter =multiply_lin_com(equation, equation);
     const auto& result = multiply_lin_com(equation, inter);
@@ -225,13 +226,13 @@ static LinComMapZ<Cos<LinComArrZ<XY>>> multiply_cubic(const LinComMapZ<Cos<LinCo
     return result;
 }
 
-static LinComMapZ<Cos<LinComArrZ<XY>>> multiply_square(const LinComMapZ<Sin<LinComArrZ<XY>>>& equation) {
+inline LinComMapZ<Cos<LinComArrZ<XY>>> multiply_square(const LinComMapZ<Sin<LinComArrZ<XY>>>& equation) {
 
     const auto& result =multiply_lin_com(equation, equation);
     return result;
 }
 
-static LinComMapZ<Sin<LinComArrZ<XY>>> multiply_cubic(const LinComMapZ<Sin<LinComArrZ<XY>>>& equation) {
+inline LinComMapZ<Sin<LinComArrZ<XY>>> multiply_cubic(const LinComMapZ<Sin<LinComArrZ<XY>>>& equation) {
 
     const auto& inter =multiply_lin_com(equation, equation);
     const auto& result = multiply_lin_com( inter,equation);

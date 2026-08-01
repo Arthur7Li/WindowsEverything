@@ -14,6 +14,12 @@
 #include "equations_test.hpp"
 #include "general_test.hpp"
 #include "gradient_test.hpp"
+#include "intersection_test.hpp"
+#include "falgo_test.hpp"
 #include "parse_test.hpp"
 #include "shooting_angles_test.hpp"
+#include "triangle_billiard4_test.hpp"
 #include "trig_identities_test.hpp"
+#include "unfolding_test.hpp"
+#include "wrapper_test.hpp"
+// abdul 27/07/2026 [register focused native regressions for audited ABI, certified geometry, Vary4, restricted merge, and transforms]

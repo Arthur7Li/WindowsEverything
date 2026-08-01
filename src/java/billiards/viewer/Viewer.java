@@ -32,6 +32,7 @@ import billiards.codeseq.CodeType;
 import billiards.codeseq.InvalidCodeSequence;
 import billiards.codeseq.Storage;
 import billiards.cover.CoverStuff;
+import billiards.cover.CoverTriple;
 import billiards.cover.HalfTriple;
 import billiards.cover.Triple;
 import billiards.database.*;
@@ -76,6 +77,7 @@ import java.io.PrintWriter;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.time.Duration;
 import java.util.*;
 import java.util.List;
 import java.util.Map.Entry;
@@ -128,9 +130,6 @@ import javafx.stage.Stage;
 import static billiards.codeseq.CodeType.OSNO;
 import static billiards.viewer.Utils.getCoverCodeString;
 import static billiards.viewer.Utils.readFromFile;
-//Suryansh
-import billiards.viewer.Updater;
-
 // Places for input
 // btnIterate in other window
 // calculateCurrentCodeNumbers
@@ -207,7 +206,6 @@ public final class Viewer {
     // Zhao Yu Li, May 14, 2025.
     // Storages the codes from the tetrahedron vary tasks, so that all vary tasks from the tetrahedron have a single
     // place to store their codes. This list can then be used to do a final comparison to find the intersection.
-    ArrayList<MutableSortedSet<ClassifiedCodeSequence>> tetrahedronCodes = new ArrayList<>();
 
     final Map<ConvexPolygon, Color> mrrBounds = new HashMap<>();
 
@@ -529,12 +527,17 @@ public final class Viewer {
     final CheckBox boundsCheckBox = new CheckBox(); // where to put this in the menu?
 
     ExecutorService executorService;
+    // abdul 28/07/2026 [centralize every Viewer operation under one shutdown-aware ownership registry]
+    private final OperationRegistry operations;
+    private final AtomicBoolean shutdownRequested = new AtomicBoolean(false);
 
     // Full image redraws are expensive and can be requested repeatedly by zoom,
     // toggles, and cover/vary updates. This pair lets renderRegions discard a
     // stale redraw before it overwrites a newer JavaFX image.
     private volatile Future<?> renderFuture;
     private final AtomicLong renderGeneration = new AtomicLong();
+    // abdul 28/07/2026 [retain pixels only as an immutable image-camera-options generation]
+    private volatile CommittedRaster committedRaster;
     QueryStage queryStage;
 
     // the Boyan Menu
@@ -559,7 +562,7 @@ public final class Viewer {
     final Button superPolyVaryBtn = new Button();
     final CheckBox superAutoCb = new CheckBox();
 
-    final BoyanMenu boyanMenu = new BoyanMenu(cycleVaryButton, middleVaryLBtn, polyVaryBtn, varyLBtn, autoPolyVaryBtn, lineStartField, lineStepField, lineEndField, superPolyVaryBtn, superAutoCb, TipOpenDelay, TipCloseDelay);
+    final BoyanMenu boyanMenu;
 
     final Button smallCoverButton = new Button("LiCover");
     final SmallCoverWindow smallCoverWindow;
@@ -571,18 +574,23 @@ public final class Viewer {
     AutoPolyVaryLoad autoPolyVaryWindow = null;
     SuperPolyVaryLoad superPolyVaryWindow = null;
 
-    //Suryansh Aug 11 2025
-    private final String versionNumber; 
-    final Button updateButton = new Button("Check for Updates"); 
+    final Button updateButton = new Button("Check for Updates");
 
     // Zhao Yu Li, Jul 7, 2025.
     // Pattern calculator
     final Button patternCalculatorBtn = new Button();
 
     public Viewer(final Stage primaryStage, final String version, final ExecutorService executor,
-                  final ConnectionPool pool, final String dbName) {
+                  final ConnectionPool pool, final String dbName,
+                  final OperationRegistry operations) {
         Viewer.dbname=dbName;
-        this.versionNumber = version;
+        this.operations = Objects.requireNonNull(operations, "operations");
+        // abdul 27/07/2026 [construct BoyanMenu after the application operation registry exists so every Vary worker shares shutdown ownership]
+        this.boyanMenu = new BoyanMenu(
+                cycleVaryButton, middleVaryLBtn, polyVaryBtn, varyLBtn,
+                autoPolyVaryBtn, lineStartField, lineStepField, lineEndField,
+                superPolyVaryBtn, superAutoCb, TipOpenDelay, TipCloseDelay,
+                this.operations);
 
         try {
             if (!Files.exists(Paths.get(tmpDir))) {
@@ -600,9 +608,11 @@ public final class Viewer {
 
         queryStage = new QueryStage(windowTitle, pool, this);
 
+        // abdul 27/07/2026 [pass application lifetime ownership into native cover calculations]
         coverWindow = new CoverWindow(
                 String.format("Cover %s", version), pool,
-                labelMainWindow, () -> loadCover("cover", executor), this);
+                labelMainWindow, () -> loadCover("cover", executor), this,
+                this.operations);
 
         smallCoverWindow = new SmallCoverWindow(
                 String.format("Small Cover %s", version), pool,
@@ -654,16 +664,11 @@ public final class Viewer {
         iterationEnd.setPrefWidth(40);
         iterationEnd.setStyle(textBoxColor);
 
-        // Suryansh Aug 11 2025
-        updateButton.setOnAction(e -> {
-            new Thread(() -> {
-                try {
-                    Updater.checkForUpdates(versionNumber);
-                } catch (Exception ex) {
-                    ex.printStackTrace();
-                }
-            }).start();
-        });
+        // abdul 27/07/2026 [disable unauthenticated self-replacement; releases must be installed manually]
+        updateButton.setText("Updates disabled");
+        updateButton.setDisable(true);
+        updateButton.setTooltip(Utils.toolTip(
+                "Automatic updates are disabled. Install trusted releases manually."));
 
         // Zhao Yu Li, May 27, 2025.
         // Add the pattern lookup button and the polygon intersection pattern to the iteration window
@@ -1681,7 +1686,11 @@ public final class Viewer {
         Utils.colorButton(iterateToLimitBtn, Color.SKYBLUE, clickColor);
         iterateToLimitBtn.setOnAction(event -> {
             // Lazy initialization
-            if (iterateToLimitWindow == null) this.iterateToLimitWindow = new IterateToLimitWindow(pool);
+            if (iterateToLimitWindow == null) {
+                // abdul 27/07/2026 [give Iterate lookup work the same application shutdown owner as other Viewer operations]
+                this.iterateToLimitWindow =
+                        new IterateToLimitWindow(pool, operations);
+            }
 
             if (iterateToLimitWindow.isShowing()) iterateToLimitWindow.toFront();
 
@@ -1783,8 +1792,32 @@ public final class Viewer {
 
             if (varyParams._3 == -1) return;
 
-            ExecutorService executorService = Executors.newFixedThreadPool(Utils.numThreads);
-            queuedVaryTask(varyParams._1, varyParams._2, 0, varyParams._2.size(), executorService, varyParams._3, varyParams._4, varyParams._5, varyParams._6);
+            // abdul 27/07/2026 [isolate TetraBar state and reject overlapping generations]
+            final TetraBarRequest request = new TetraBarRequest(
+                    varyParams._1, varyParams._2, varyParams._3,
+                    varyParams._4, varyParams._5, varyParams._6,
+                    Double.parseDouble(boyanMenu.varyX2Text.getText()),
+                    Double.parseDouble(boyanMenu.varyY2Text.getText()),
+                    Double.parseDouble(boyanMenu.varyX3Text.getText()),
+                    Double.parseDouble(boyanMenu.varyY3Text.getText()),
+                    Double.parseDouble(boyanMenu.line1CutText.getText()),
+                    Double.parseDouble(boyanMenu.line2CutText.getText()),
+                    boyanMenu.snapshotSearchRequest());
+            final OperationRegistry.OperationHandle operation;
+            try {
+                // abdul 31/07/2026 [admit TetraBar through the shared native Vary cancellation lifetime]
+                operation = operations.openExclusive(
+                        "TetraBar", OperationRegistry.NATIVE_VARY_OPERATION_KEY);
+            } catch (final RejectedExecutionException exception) {
+                showOperationAlreadyRunning("TetraBar");
+                return;
+            }
+            final ExecutorService outerExecutor = operation.own(
+                    Executors.newSingleThreadExecutor());
+            final ExecutorService shotExecutor = operation.own(
+                    Executors.newFixedThreadPool(Utils.numThreads));
+            queuedVaryTask(request, 0, outerExecutor, shotExecutor,
+                    new ArrayList<>(), operation);
         });
 
         lineNumberTxt.setPromptText("Line");
@@ -1866,7 +1899,26 @@ public final class Viewer {
             }
             else {
                 final ConvexPolygon screen = map.getViewRectangle().toConvexPolygon();
-                polyVaryFunction(Tuple.of(screen, 800, 300, 150, 800, 100, 100), Optional.empty(), Optional.empty(), false, false, executor);
+                final OperationRegistry.OperationHandle operation;
+                try {
+                    // abdul 31/07/2026 [prevent another native Vary workflow from resetting this run's cancel state]
+                    operation = operations.openExclusive(
+                            "Whole-screen PolyVary",
+                            OperationRegistry.NATIVE_VARY_OPERATION_KEY);
+                } catch (final RejectedExecutionException exception) {
+                    showOperationAlreadyRunning("PolyVary");
+                    return;
+                }
+                // abdul 27/07/2026 [snapshot search controls before starting the whole-screen PolyVary generation]
+                try {
+                    polyVaryFunction(Tuple.of(screen, 800, 300, 150, 800, 100, 100), Optional.empty(), Optional.empty(), false, false,
+                            boyanMenu.snapshotSearchRequest(),
+                            Integer.parseInt(boyanMenu.autoCycleText.getText()),
+                            operation, executor);
+                } catch (final RuntimeException exception) {
+                    operation.cancel();
+                    throw exception;
+                }
             }
         });
 
@@ -1908,7 +1960,26 @@ public final class Viewer {
                 if (polyOpt.isPresent()) {
                     final Tuple7<ConvexPolygon, Integer, Integer, Integer, Integer, Integer, Integer> polyVals = polyOpt.get();
                     autoVaryArea = Optional.of(polyVals._1);
-                    polyVaryFunction(polyVals, Optional.empty(), Optional.empty(), PolyVaryLoad.Override, PolyVaryLoad.AutoCover, polyVaryLoad.getAutoSmallCover(), executor);
+                    final OperationRegistry.OperationHandle operation;
+                    try {
+                        // abdul 31/07/2026 [give direct PolyVary one exclusive native cancellation lifetime]
+                        operation = operations.openExclusive(
+                                "PolyVary",
+                                OperationRegistry.NATIVE_VARY_OPERATION_KEY);
+                    } catch (final RejectedExecutionException exception) {
+                        showOperationAlreadyRunning("PolyVary");
+                        return;
+                    }
+                    // abdul 27/07/2026 [freeze Boyan search controls for the complete direct PolyVary run]
+                    try {
+                        polyVaryFunction(polyVals, Optional.empty(), Optional.empty(), PolyVaryLoad.Override, PolyVaryLoad.AutoCover,
+                                polyVaryLoad.getAutoSmallCover(), boyanMenu.snapshotSearchRequest(),
+                                Integer.parseInt(boyanMenu.autoCycleText.getText()),
+                                operation, executor);
+                    } catch (final RuntimeException exception) {
+                        operation.cancel();
+                        throw exception;
+                    }
                     renderRegions(onScreenSequences, guideLinesImageView, regionsImageView, executor);
                 }
             }
@@ -1935,9 +2006,8 @@ public final class Viewer {
 
                 if (varyWindow.stage.isShowing()) {
                     varyWindow.stage.toFront();
-                    if (!boyanMenu.varyOnePoint.isSelected()) {
-                        return;
-                    }
+                    // abdul 27/07/2026 [reject nested VaryL commands while one dialog generation is active]
+                    return;
                 }
 
                 final Optional<Tuple7<MutableList<Vector2>, Integer, Integer, Integer, Integer, Integer, Integer>> pointOpt =
@@ -1958,19 +2028,37 @@ public final class Viewer {
                     // CSmax, OSOmax, OSNOmax, CSmaxSS, OSOmaxSS, OSNOmaxSS
                     final int[] maximums = {point._2, point._3, point._4, point._5, point._6, point._7};
                     final boolean draw = varyWindow.getDraw();
-                    final boolean overrideSS = VaryWindowL.Override;
-                    final boolean autoCover = VaryWindowL.AutoCover;
+                    final boolean overrideSS = varyWindow.getOverride();
+                    final boolean autoCover = varyWindow.getAutoCover();
                     final boolean autoSmallCover = varyWindow.getAddToSmallCover();
-                    final int maxPrint = Integer.parseInt(boyanMenu.maxPrinting.getText());
+                    final VarySearchRequest searchRequest =
+                            boyanMenu.snapshotSearchRequest();
+                    final int maxPrint = searchRequest.maximumPrinting();
 
                     System.out.printf("Max code length: CS-%d OSO-%d OSNO-%d\n", maximums[0], maximums[1], maximums[2]);
                     if(overrideSS) {
                         System.out.printf("Override side sums: CS-%d OSO-%d OSNO-%d\n", maximums[3], maximums[4], maximums[5]);
                     }
 
-                    final ExecutorService storageExecutor = new PriorityExecutor(Utils.numThreads);
-                    final ExecutorService shotExecutor = Executors.newFixedThreadPool(Utils.numThreads); // This can be a default executor
-                    drawVaryL(pointList, maximums, draw, overrideSS, autoCover, autoSmallCover, maxPrint, executor, storageExecutor, shotExecutor, false, false);
+                    final OperationRegistry.OperationHandle operation;
+                    try {
+                        // abdul 31/07/2026 [give VaryL the shared native cancellation lifetime]
+                        operation = operations.openExclusive(
+                                "VaryL",
+                                OperationRegistry.NATIVE_VARY_OPERATION_KEY);
+                    } catch (final RejectedExecutionException exception) {
+                        showOperationAlreadyRunning("VaryL");
+                        return;
+                    }
+                    final ExecutorService storageExecutor = operation.own(
+                            new PriorityExecutor(Utils.numThreads));
+                    final ExecutorService shotExecutor = operation.own(
+                            Executors.newFixedThreadPool(Utils.numThreads));
+                    drawVaryL(
+                            pointList, maximums, draw, overrideSS, autoCover,
+                            autoSmallCover, maxPrint, executor,
+                            storageExecutor, shotExecutor, false, false,
+                            searchRequest, operation);
                 }
             }
         });
@@ -1979,7 +2067,8 @@ public final class Viewer {
         cycleVaryButton.setText("LiCycle");
         Utils.colorButton(cycleVaryButton, Color.PALEVIOLETRED, Color.GOLD);
         cycleVaryButton.setOnAction(event -> {
-            if (cycleVaryWindow == null) cycleVaryWindow = new CycleVaryWindow("CycleVary", "CycleVary", tmpDir + "cover_polygon.txt", tmpDir + "CycleVaryBounds.txt", tmpDir + "CycleVaryStep.txt", tmpDir + "CycleVaryCoords.txt", this);
+            // abdul 27/07/2026 [share application shutdown ownership with the lazily-created CycleVary controller]
+            if (cycleVaryWindow == null) cycleVaryWindow = new CycleVaryWindow("CycleVary", "CycleVary", tmpDir + "cover_polygon.txt", tmpDir + "CycleVaryBounds.txt", tmpDir + "CycleVaryStep.txt", tmpDir + "CycleVaryCoords.txt", this, operations);
 
             if (cycleVaryWindow.stage.isShowing()) cycleVaryWindow.stage.toFront();
             else cycleVaryWindow.show();
@@ -2007,9 +2096,8 @@ public final class Viewer {
 
                 if (middleVaryWindow.stage.isShowing()) {
                     middleVaryWindow.stage.toFront();
-                    if (!boyanMenu.varyOnePoint.isSelected()) {
-                        return;
-                    }
+                    // abdul 27/07/2026 [reject nested MiddleVaryL commands while its modal generation is active]
+                    return;
                 }
 
                 final Optional<Tuple7<MutableList<Vector2>, Integer, Integer, Integer, Integer, Integer, Integer>> pointOpt =
@@ -2030,20 +2118,38 @@ public final class Viewer {
                     // CSmax, OSOmax, OSNOmax, CSmaxSS, OSOmaxSS, OSNOmaxSS
                     final int[] maximums = {point._2, point._3, point._4, point._5, point._6, point._7};
                     final boolean draw = middleVaryWindow.getDraw();
-                    final boolean overrideSS = VaryWindowL.Override;
-                    final boolean autoCover = VaryWindowL.AutoCover;
+                    final boolean overrideSS = middleVaryWindow.getOverride();
+                    final boolean autoCover = middleVaryWindow.getAutoCover();
                     final boolean autoSmallCover = middleVaryWindow.getAddToSmallCover();
-                    final int maxPrint = Integer.parseInt(boyanMenu.maxPrinting.getText());
+                    final VarySearchRequest searchRequest =
+                            boyanMenu.snapshotSearchRequest();
+                    final int maxPrint = searchRequest.maximumPrinting();
 
                     System.out.printf("Max code length: CS-%d OSO-%d OSNO-%d\n", maximums[0], maximums[1], maximums[2]);
                     if(overrideSS) {
                         System.out.printf("Override side sums: CS-%d OSO-%d OSNO-%d\n", maximums[3], maximums[4], maximums[5]);
                     }
 
-                    final ExecutorService storageExecutor = new PriorityExecutor(Utils.numThreads);
-                    final ExecutorService shotExecutor = Executors.newFixedThreadPool(Utils.numThreads); // This can be a default executor
+                    final OperationRegistry.OperationHandle operation;
+                    try {
+                        // abdul 31/07/2026 [give MiddleVaryL the shared native cancellation lifetime]
+                        operation = operations.openExclusive(
+                                "MiddleVaryL",
+                                OperationRegistry.NATIVE_VARY_OPERATION_KEY);
+                    } catch (final RejectedExecutionException exception) {
+                        showOperationAlreadyRunning("VaryL");
+                        return;
+                    }
+                    final ExecutorService storageExecutor = operation.own(
+                            new PriorityExecutor(Utils.numThreads));
+                    final ExecutorService shotExecutor = operation.own(
+                            Executors.newFixedThreadPool(Utils.numThreads));
                     final boolean firstLastSelected = middleVaryWindow.getFirstLastSelected();
-                    drawVaryL(pointList, maximums, draw, overrideSS, autoCover, autoSmallCover, maxPrint, executor, storageExecutor, shotExecutor, true, firstLastSelected);
+                    drawVaryL(
+                            pointList, maximums, draw, overrideSS, autoCover,
+                            autoSmallCover, maxPrint, executor,
+                            storageExecutor, shotExecutor, true,
+                            firstLastSelected, searchRequest, operation);
                 }
             }
         });
@@ -2119,7 +2225,28 @@ public final class Viewer {
             }
             final Tuple7<ConvexPolygon, Integer, Integer, Integer, Integer, Integer, Integer> polyVals = polyOpt.get();
 
-            autoPolyVaryFunction(polyVals, Optional.empty(), Optional.empty(), AutoPolyVaryLoad.Override, AutoPolyVaryLoad.AutoCover, autoPolyVaryWindow.getAutoSmallCover(), executor);
+            final OperationRegistry.OperationHandle operation;
+            try {
+                // abdul 31/07/2026 [keep AutoPolyVary cancellation latched across all recursive coordinates]
+                operation = operations.openExclusive(
+                        "AutoPolyVary",
+                        OperationRegistry.NATIVE_VARY_OPERATION_KEY);
+            } catch (final RejectedExecutionException exception) {
+                showOperationAlreadyRunning("PolyVary");
+                return;
+            }
+            // abdul 27/07/2026 [capture and own one AutoPolyVary generation]
+            try {
+                autoPolyVaryFunction(polyVals, Optional.empty(), Optional.empty(), AutoPolyVaryLoad.Override,
+                        AutoPolyVaryLoad.AutoCover, autoPolyVaryWindow.getAutoSmallCover(),
+                        boyanMenu.snapshotSearchRequest(),
+                        Integer.parseInt(boyanMenu.autoCycleText.getText()),
+                        startStepEnd, autoPolyVaryWindow.snapshotOptions(),
+                        operation, executor);
+            } catch (final RuntimeException exception) {
+                operation.cancel();
+                throw exception;
+            }
             // Finally, put the new polygons behind the existing cover, in the case that the final PolyVary
             // invocation found some new covers.
             //renderRegions(onScreenSequences, guideLinesImageView, regionsImageView, executor);
@@ -2183,7 +2310,47 @@ public final class Viewer {
 //        		alert.showAndWait();
                 return;
             }
-            superPolyVaryFunction(polyOpt.get(), executor);
+            final boolean automatic = superAutoCb.isSelected();
+            if (automatic && autoPolyVaryWindow == null) {
+                autoPolyVaryWindow = new AutoPolyVaryLoad(
+                        "AutoPolyVary", "AutoVary",
+                        tmpDir + "cover_polygon.txt",
+                        tmpDir + "PolyAutoVaryBounds.txt");
+            }
+            final Tuple3<Integer, Integer, Integer> superRange =
+                    automatic ? getStartStepEnd() : Tuple.of(1, 1, 1);
+            if (superRange._1 == null) {
+                return;
+            }
+            // abdul 27/07/2026 [freeze the complete Super schedule before its first callback]
+            final SuperPolyVaryRequest request = new SuperPolyVaryRequest(
+                    polyOpt.get()._1,
+                    superPolyVaryWindow.getSettingsSnapshot(),
+                    automatic,
+                    Integer.parseInt(boyanMenu.autoCycleText.getText()),
+                    Integer.parseInt(boyanMenu.cycleStepText.getText()),
+                    superRange._1, superRange._2, superRange._3,
+                    automatic
+                            ? autoPolyVaryWindow.snapshotOptions()
+                            : new AutoPolyVaryOptions(
+                                    false, 0, 0, false, false),
+                    boyanMenu.snapshotSearchRequest());
+            final OperationRegistry.OperationHandle operation;
+            try {
+                // abdul 31/07/2026 [keep one native cancellation lifetime across all SuperPolyVary repetitions]
+                operation = operations.openExclusive(
+                        "SuperPolyVary",
+                        OperationRegistry.NATIVE_VARY_OPERATION_KEY);
+            } catch (final RejectedExecutionException exception) {
+                showOperationAlreadyRunning("PolyVary");
+                return;
+            }
+            try {
+                superPolyVaryFunction(request, operation, executor);
+            } catch (final RuntimeException exception) {
+                operation.cancel();
+                throw exception;
+            }
         });
 
 
@@ -2191,41 +2358,8 @@ public final class Viewer {
         fillScreenBtn.setTooltip(Utils.toolTip("Color in the area currently on screen"));
         Utils.colorButton(fillScreenBtn, Color.SKYBLUE, clickColor);
 
-        fillScreenBtn.setOnAction(event -> {
-
-            final Image image = regionsImageView.getImage();
-            final PixelReader reader = image.getPixelReader();
-
-            int numHoles = 0;
-
-            for (int pixelX = 0; pixelX < SIDE; pixelX += 1) {
-                for (int pixelY = 0; pixelY < SIDE; pixelY += 1) {
-                    final int color = reader.getArgb(pixelX, pixelY);
-
-                    if (color == 0) {
-                        numHoles += 1;
-                    }
-                }
-            }
-
-            if (numHoles > 0) {
-                final Alert alert = new Alert(AlertType.CONFIRMATION);
-
-                alert.setTitle("Fill Screen");
-                alert.setHeaderText("Fill Screen");
-                alert.setContentText(
-                        "This area contains holes. Are you sure you want to fill the screen?");
-                final Optional<ButtonType> response = alert.showAndWait();
-
-                if (response.isPresent() && response.get() == ButtonType.OK) {
-                    screenFills.add(map.getViewRectangle());
-                    setImageColor((WritableImage) regionsImageView.getImage(), screenFillsColor);
-                }
-            } else {
-                screenFills.add(map.getViewRectangle());
-                setImageColor((WritableImage) regionsImageView.getImage(), screenFillsColor);
-            }
-        });
+        // abdul 27/07/2026 [bind Fill Screen decisions and the saved rectangle to one committed image-camera generation]
+        fillScreenBtn.setOnAction(event -> fillCommittedScreen(executor));
 
         clearFillsBtn.setText("Clear Fills");
         clearFillsBtn.setTooltip(Utils.toolTip("Clear all screen fills"));
@@ -2654,7 +2788,7 @@ public final class Viewer {
         Platform.runLater(() -> {
     // If you want it checked on boot:
             updateReflection();
-            
+
             // OR, if you want it to process its default state (even if false):
             // Just extract to a method like in Option 2 and call it here.
         });
@@ -3154,27 +3288,80 @@ public final class Viewer {
 
                 final List<String> coverDirs = new FastList<>();
 
-                for (final File file : dir.listFiles()) {
+                final File[] children = dir.listFiles();
+                if (children == null) {
+                    return;
+                }
+                for (final File file : children) {
                     if (file.isDirectory()) {
-                        coverDirs.add(file.getPath());
+                        coverDirs.add(file.getAbsolutePath());
                     }
                 }
-
-                final File cover = new File("cover");
-
-                // Create it if it doesn't exist
-                cover.mkdir();
-
-                // Delete everything in the cover dir before hand
-                for (final File file : cover.listFiles()) {
-                    file.delete();
+                if (coverDirs.isEmpty()) {
+                    return;
                 }
-
-                // Just save it to the cover directory for now
-                Wrapper.mergeCovers(cover.getPath(), coverDirs, pool);
-
-                // Loading is sloooooow, so don't do that now
-                //loadCover("cover", executor);
+                final OperationRegistry.OperationHandle operation;
+                try {
+                    operation = operations.openExclusive(
+                            "Merge cover", "cover-artifact");
+                } catch (final RejectedExecutionException exception) {
+                    showOperationAlreadyRunning("Cover merge");
+                    return;
+                }
+                final ExecutorService mergeExecutor = operation.own(
+                        Executors.newSingleThreadExecutor());
+                final Task<CoverArtifactService.MergeResult> mergeTask =
+                        new Task<>() {
+                    @Override
+                    protected CoverArtifactService.MergeResult call() {
+                        // abdul 27/07/2026 [merge into a validated sibling generation before touching the live cover]
+                        return CoverArtifactService.replaceMergedCover(
+                                Paths.get("cover"),
+                                staging -> Wrapper.mergeCovers(
+                                        staging.toString(), coverDirs, pool));
+                    }
+                };
+                mergeTask.setOnSucceeded(event -> {
+                    if (!operation.permitsPublication()) {
+                        // abdul 28/07/2026 [suppress queued merge UI publication after artifact/application cancellation]
+                        return;
+                    }
+                    try {
+                        final CoverArtifactService.MergeResult result =
+                                mergeTask.get();
+                        if (result.rollbackDirectory() != null) {
+                            System.out.println(
+                                    "Prior cover retained at "
+                                            + result.rollbackDirectory());
+                        }
+                        operation.complete();
+                    } catch (final InterruptedException
+                            | ExecutionException exception) {
+                        operation.cancel();
+                        throw new RuntimeException(exception);
+                    }
+                });
+                mergeTask.setOnCancelled(event -> operation.cancel());
+                mergeTask.setOnFailed(event -> {
+                    final boolean reportFailure =
+                            operation.permitsPublication();
+                    operation.cancel();
+                    if (reportFailure) {
+                        final Alert alert = new Alert(AlertType.ERROR);
+                        alert.setTitle("Merge");
+                        alert.setHeaderText("Cover merge failed");
+                        alert.setContentText(
+                                mergeTask.getException().getMessage());
+                        alert.showAndWait();
+                    }
+                });
+                operation.track(mergeTask);
+                try {
+                    mergeExecutor.execute(mergeTask);
+                } catch (final RejectedExecutionException exception) {
+                    operation.cancel();
+                    throw exception;
+                }
             }
 
         });
@@ -3718,10 +3905,10 @@ public final class Viewer {
         boyanRdoBtn.setText("Boyan Menu");
         /*boyanRdoBtn.setOnAction(event -> {
 
-        	zoomFeildsVBox.getChildren().clear();
-        	boyanZoomHBox.getChildren().clear();
-        	boyanMenuExtra.getChildren().clear();
-        	twoHBox.getChildren().clear();
+            zoomFeildsVBox.getChildren().clear();
+            boyanZoomHBox.getChildren().clear();
+            boyanMenuExtra.getChildren().clear();
+            twoHBox.getChildren().clear();
 
 
             boyanZoomHBox.getChildren().addAll(zoomButton, xMinTextField, yMinTextField);
@@ -3882,6 +4069,10 @@ public final class Viewer {
         // Stage
         mainWindow.setTitle(windowTitle);
         mainWindow.setOnCloseRequest(event -> {
+            event.consume();
+            if (!shutdownRequested.compareAndSet(false, true)) {
+                return;
+            }
             try {
                 closeChildWindowsForExit();
             } catch (final RuntimeException e) {
@@ -3891,17 +4082,36 @@ public final class Viewer {
                 alert.setHeaderText("Could not save window state");
                 alert.setContentText(e.getMessage());
                 alert.showAndWait();
-                event.consume();
+                shutdownRequested.set(false);
                 return;
             }
 
-            // close all the windows
-            System.out.println("Send close request");
-            Platform.exit();
+            // abdul 27/07/2026 [cancel and asynchronously join all registered per-operation work before allowing Platform exit]
+            mainWindow.hide();
+            operations.shutdownAsync(Duration.ofSeconds(30))
+                    .whenComplete((stopped, failure) -> Platform.runLater(() -> {
+                        if (failure == null && Boolean.TRUE.equals(stopped)) {
+                            System.out.println(
+                                    "All operation workers stopped; exiting.");
+                            Platform.exit();
+                            return;
+                        }
+                        final Alert alert = new Alert(AlertType.ERROR);
+                        alert.setTitle("Shutdown Incomplete");
+                        alert.setHeaderText(
+                                "Background work did not stop safely");
+                        alert.setContentText(
+                                failure == null
+                                    ? "The application remains open because an operation did not terminate within 30 seconds."
+                                    : failure.getMessage());
+                        mainWindow.show();
+                        alert.showAndWait();
+                    }));
         });
         mainWindow.setScene(scene);
     }
 
+    // abdul 28/07/2026 [close every owned child before operation shutdown so state saves and child cancellation finish first]
     private void closeChildWindowsForExit() {
         // JavaFX does not run destructors for child windows. Close the viewer-owned stages explicitly so their text
         // buffers are saved before Platform.exit() tears down the application.
@@ -3934,15 +4144,25 @@ public final class Viewer {
         }
     }
 
+    // abdul 28/07/2026 [give every rejected exclusive generation one consistent user-visible admission result]
+    private void showOperationAlreadyRunning(final String label) {
+        final Alert alert = new Alert(AlertType.INFORMATION);
+        alert.setTitle(label);
+        alert.setHeaderText(label + " is already running");
+        alert.setContentText(
+                "Cancel or wait for the active generation before starting another.");
+        alert.showAndWait();
+    }
+
     // Do initial rendering
     public void start(final ExecutorService executor) {
         renderRegions(onScreenSequences, guideLinesImageView, regionsImageView, executor);
         mainWindow.show();
         Platform.runLater(() -> {
-            
+
         // If you used Option 2 (The Best Practice) from the previous answer:
         updateReflection();
-        
+
         /* * OR, if you used Option 1 (The Quick Fix) and didn't make a new method:
             * reflectCheckBox.getOnAction().handle(null);
             */
@@ -4382,7 +4602,15 @@ public final class Viewer {
                                   final ExecutorService shotExecutor, final boolean printMid, final boolean firstLast,
                                   final boolean addToAllPositive, final boolean addToPlusMinus, final int idx,
                                   final int step, final int end, final int codesFound, final ProgressMultiTask overallProgress,
-                                  final ArrayList<Storage> previousCodes) {
+                                  final ArrayList<Storage> previousCodes,
+                                  final VarySearchRequest searchRequest,
+                                  final OperationRegistry.OperationHandle operation) {
+
+        // abdul 28/07/2026 [stop recursive VaryL callbacks from reading or publishing Viewer state after shutdown cancellation]
+        if (!operation.permitsPublication()) {
+            overallProgress.close();
+            return;
+        }
 
         // Zhao Yu Li, Jun 27, 2025.
         // Move the screen to the point we are working on
@@ -4417,10 +4645,12 @@ public final class Viewer {
                         Utils.shutdownExecutorAsync(shotExecutor);
                         overallProgress.close();
                         if(autoCover) coverWindow.show();
+                        operation.cancel();
                     } else if (idx + step < end) {
                         recurseDrawVaryL(points, max, codeList, draw, overrideSS, autoCover, autoSmallCover, maxPrint, executor, storageExecutor,
                                 shotExecutor, printMid, firstLast, addToAllPositive, addToPlusMinus, idx + step, step, end,
-                                codesFound, overallProgress, previousCodes);
+                                codesFound, overallProgress, previousCodes,
+                                searchRequest, operation);
                     } else {
                         overallProgress.close();
 
@@ -4444,6 +4674,7 @@ public final class Viewer {
                             System.out.println("+-------------- " + (printMid ? "MiddleVaryL" : "VaryL") + " Completed --------------+");
                             System.out.println();
                         }
+                        operation.complete();
                     }
 
                     return;
@@ -4454,7 +4685,7 @@ public final class Viewer {
         // Create the task
         final VaryLTask task = new VaryLTask(
                 Array.ofAll(points),
-                codeList, boyanMenu,
+                codeList, boyanMenu, searchRequest,
                 Array.ofAll(max),
                 pool,
                 overrideSS,
@@ -4477,6 +4708,9 @@ public final class Viewer {
 
         // Update screen when change detected
         task.getPartialProperty().get().addListener((ListChangeListener.Change<? extends Storage> c) -> {
+            if (!operation.permitsPublication()) {
+                return;
+            }
             while (c.next()) {
                 if(!c.wasAdded()) continue;
                 // Draw all new additions
@@ -4493,10 +4727,16 @@ public final class Viewer {
         });
 
         task.setOnSucceeded(e -> {
+            if (!operation.permitsPublication()) {
+                overallProgress.close();
+                return;
+            }
             final ObservableList<Storage> storages;
             try {
                 storages = task.get();
             } catch (InterruptedException | ExecutionException exception) {
+                // abdul 27/07/2026 [release the VaryL generation if result delivery itself fails]
+                operation.cancel();
                 throw new RuntimeException(exception);
             }
 
@@ -4523,10 +4763,13 @@ public final class Viewer {
                 overallProgress.close();
                 if (autoCover) coverWindow.show();
                 if (autoSmallCover) smallCoverWindow.show();
+                // abdul 27/07/2026 [make late progress-dialog cancellation terminal for the registered run]
+                operation.cancel();
             } else if (idx + step < end) {
                 recurseDrawVaryL(points, max, codeList, draw, overrideSS, autoCover, autoSmallCover, maxPrint, executor, storageExecutor,
                         shotExecutor, printMid, firstLast, addToAllPositive, addToPlusMinus, idx + step, step, end,
-                        storages.size() + codesFound, overallProgress, new ArrayList<>(storages));
+                        storages.size() + codesFound, overallProgress,
+                        new ArrayList<>(storages), searchRequest, operation);
             } else {
                 overallProgress.close();
 
@@ -4557,10 +4800,16 @@ public final class Viewer {
                     System.out.println("+-------------- " + (printMid ? "MiddleVaryL" : "VaryL") + " Completed --------------+");
                     System.out.println();
                 }
+                operation.complete();
             }
         });
 
         task.setOnCancelled(e -> {
+            if (!operation.permitsPublication()) {
+                // abdul 28/07/2026 [suppress VaryL partial publication when cancellation came from application shutdown]
+                overallProgress.close();
+                return;
+            }
             task.getPartialProperty().get().forEach(storage -> {
                 if(!onScreenSequences.containsKey(storage)) {
                     final Color color;
@@ -4598,24 +4847,42 @@ public final class Viewer {
                 System.out.println("+-------------- " + (printMid ? "MiddleVaryL" : "VaryL") + " Cancelled --------------+");
 
             }
+            operation.cancel();
         });
 
         task.setOnFailed(e -> {
             overallProgress.close();
-            throw new RuntimeException(task.getException());
+            final boolean reportFailure =
+                    operation.permitsPublication();
+            // abdul 27/07/2026 [give failed VaryL generations finally-equivalent cancellation and executor ownership]
+            operation.cancel();
+            if (reportFailure) {
+                throw new RuntimeException(task.getException());
+            }
         });
 
-        executor.execute(task);
+        operation.track(task);
+        try {
+            executor.execute(task);
+        } catch (final RejectedExecutionException exception) {
+            operation.cancel();
+            throw exception;
+        }
     }
 
     private void drawVaryL(final MutableList<Vector2> points, final int[] max, final boolean draw,
                            final boolean overrideSS, final boolean autoCover, final boolean autoSmallCover, final int maxPrint,
                            final ExecutorService executor, final ExecutorService storageExecutor, final ExecutorService shotExecutor,
-                           final boolean printMid, final boolean firstLast) {
+                           final boolean printMid, final boolean firstLast,
+                           final VarySearchRequest searchRequest,
+                           final OperationRegistry.OperationHandle operation) {
         // Zhao Yu Li, Jun 27, 2025.
         // Attempt to read start, step, and end from the user.
         Tuple3<Integer, Integer, Integer> startStepEnd = getStartStepEnd(points.size());
-        if (startStepEnd._1 == null) return;
+        if (startStepEnd._1 == null) {
+            operation.cancel();
+            return;
+        }
         final int start = startStepEnd._1;
         final int step = startStepEnd._2;
         final int end = startStepEnd._3;
@@ -4625,7 +4892,12 @@ public final class Viewer {
         boolean addToAllPositive = printMid ? middleVaryWindow.getAddToAllPositiveSelected() : varyWindow.getAddToAllPositiveSelected();
         boolean addToPlusMinus = printMid ? middleVaryWindow.getAddToPlusMinusSelected() : varyWindow.getAddToPlusMinusSelected();
 
-        if ((addToAllPositive || addToPlusMinus) && iterateToLimitWindow == null) iterateToLimitWindow = new IterateToLimitWindow(pool);
+        if ((addToAllPositive || addToPlusMinus)
+                && iterateToLimitWindow == null) {
+            // abdul 27/07/2026 [retain operation ownership when AutoVary creates Iterate as a result sink]
+            iterateToLimitWindow =
+                    new IterateToLimitWindow(pool, operations);
+        }
 
         List <String> codeList = Arrays.asList(readFromFile(Viewer.tmpDir + "/cover_stables.txt").split(System.lineSeparator()));
         codeList.replaceAll(Utils::tripleTrimmer);
@@ -4637,7 +4909,8 @@ public final class Viewer {
         // Changed from a single call to a recursive call. This is to facilitate moving the screen from one point to the
         // next.
         recurseDrawVaryL(points, max, codeList, draw, overrideSS, autoCover, autoSmallCover, maxPrint, executor, storageExecutor,
-                shotExecutor, printMid, firstLast, addToAllPositive, addToPlusMinus, start-1, step, end, 0, progress, new ArrayList<>());
+                shotExecutor, printMid, firstLast, addToAllPositive, addToPlusMinus, start-1, step, end, 0, progress,
+                new ArrayList<>(), searchRequest, operation);
     }
 
     private void LoadFileAction(
@@ -4781,11 +5054,47 @@ public final class Viewer {
         final Array<ClassifiedCodeSequence> classCodeSeqs = Array.ofAll(allCodes);
 
         if (drawPictureCheckBox.isSelected()) {
-            final ExecutorService drawExecutor = Executors.newFixedThreadPool(Utils.numThreads);
+            final OperationRegistry.OperationHandle loadOperation;
+            try {
+                loadOperation = operations.open("Load codes");
+            } catch (final RejectedExecutionException exception) {
+                return;
+            }
+            // abdul 27/07/2026 [give singles and triples private executors under one batch owner]
+            final ExecutorService drawExecutor = loadOperation.own(
+                    Executors.newFixedThreadPool(Utils.numThreads));
+            final ArrayList<CoverTriple> validTriples = new ArrayList<>();
+            for (int tripleIndex = 0;
+                    tripleIndex < triples.size(); tripleIndex++) {
+                final Optional<CoverTriple> typed =
+                        CoverTriple.fromCodes(triples.get(tripleIndex));
+                if (typed.isPresent()) {
+                    validTriples.add(typed.get());
+                } else {
+                    System.err.println(
+                            "// Invalid cover triple at input index "
+                                    + tripleIndex
+                                    + ": expected stable-unstable-stable.");
+                }
+            }
+            final int operationTaskCount =
+                    validTriples.isEmpty() ? 1 : 2;
+            final AtomicInteger remainingLoadTasks =
+                    new AtomicInteger(operationTaskCount);
+            final Runnable completeLoadTask = () -> {
+                if (remainingLoadTasks.decrementAndGet() == 0) {
+                    loadOperation.complete();
+                }
+            };
             final DrawPictureTask task = new DrawPictureTask(classCodeSeqs, pool, drawExecutor, false, false);
             final Progress progress = new Progress(task);
 
             task.setOnSucceeded(e -> {
+                if (!loadOperation.permitsPublication()) {
+                    // abdul 28/07/2026 [discard base-code load success queued after batch or application cancellation]
+                    progress.close();
+                    return;
+                }
 
                 final Array<Storage> storages;
                 try {
@@ -4836,6 +5145,7 @@ public final class Viewer {
 
                 Utils.shutdownExecutorAsync(drawExecutor);
                 progress.close();
+                completeLoadTask.run();
 
                 if (tup._1.isPresent()) {
                     final Rectangle rect = tup._1.get();
@@ -4862,17 +5172,27 @@ public final class Viewer {
             });
 
             task.setOnCancelled(e -> {
-                Utils.shutdownExecutorAsync(drawExecutor);
                 progress.close();
+                loadOperation.cancel();
             });
 
             task.setOnFailed(e -> {
-                Utils.shutdownExecutorAsync(drawExecutor);
                 progress.close();
-                throw new RuntimeException(task.getException());
+                final boolean reportFailure =
+                        loadOperation.permitsPublication();
+                loadOperation.cancel();
+                if (reportFailure) {
+                    throw new RuntimeException(task.getException());
+                }
             });
 
-            executor.execute(task);
+            loadOperation.track(task);
+            try {
+                executor.execute(task);
+            } catch (final RejectedExecutionException exception) {
+                loadOperation.cancel();
+                throw exception;
+            }
 
             progress.incrementWindowCount(progressWindows);
             showProgressWindow(progress);
@@ -4880,11 +5200,21 @@ public final class Viewer {
             // Zhao Yu Li, May 13, 2025.
             // Handles the drawing and adding the triple to the cover if all three components of the triple intersects
             // with the specified polygon.
-            if (!triples.isEmpty()) {
-                final DrawPictureTaskTriples taskTriples = new DrawPictureTaskTriples(Array.ofAll(triples), pool, drawExecutor, false, false);
+            if (!validTriples.isEmpty()) {
+                final ExecutorService tripleDrawExecutor =
+                        loadOperation.own(Executors.newFixedThreadPool(
+                                Utils.numThreads));
+                final DrawPictureTaskTriples taskTriples = new DrawPictureTaskTriples(
+                        Array.ofAll(validTriples), pool,
+                        tripleDrawExecutor, false, false);
                 final Progress progressTriples = new Progress(taskTriples);
 
                 taskTriples.setOnSucceeded(e -> {
+                    if (!loadOperation.permitsPublication()) {
+                        // abdul 28/07/2026 [discard triple-load success queued after its shared batch is terminal]
+                        progressTriples.close();
+                        return;
+                    }
 
                     final Array<Storage[]> storages;
                     try {
@@ -4896,6 +5226,13 @@ public final class Viewer {
                     if (autoCover) coverWindow.appendTriplesInfo("// Load triples");
 
                     storages.forEach(triple -> {
+                        final Optional<CoverTriple> typedTriple =
+                                CoverTriple.fromStorages(triple);
+                        if (typedTriple.isEmpty()) {
+                            System.err.println(
+                                    "// Incomplete or invalid calculated cover triple was rejected.");
+                            return;
+                        }
                         final StringBuilder tripleStr = new StringBuilder();
                         int count = 0;
 
@@ -4937,15 +5274,20 @@ public final class Viewer {
                         }
 
                         if (count == 3) {
-                            if (autoCover) coverWindow.appendTriplesInfo(tripleStr.toString());
+                            // abdul 27/07/2026 [publish only the typed stable-unstable-stable artifact]
+                            if (autoCover) {
+                                coverWindow.appendTriplesInfo(
+                                        typedTriple.get().artifactText());
+                            }
                             System.out.println(tripleStr);
 
                             for (Storage storage : triple) addToOnScreenSequences(storage, color);
                         }
                     });
 
-                    Utils.shutdownExecutorAsync(drawExecutor);
+                    Utils.shutdownExecutorAsync(tripleDrawExecutor);
                     progressTriples.close();
+                    completeLoadTask.run();
 
                     if (tup._1.isPresent()) {
                         final Rectangle rect = tup._1.get();
@@ -4972,17 +5314,27 @@ public final class Viewer {
                 });
 
                 taskTriples.setOnCancelled(e -> {
-                    Utils.shutdownExecutorAsync(drawExecutor);
                     progressTriples.close();
+                    loadOperation.cancel();
                 });
 
                 taskTriples.setOnFailed(e -> {
-                    Utils.shutdownExecutorAsync(drawExecutor);
                     progressTriples.close();
-                    throw new RuntimeException(taskTriples.getException());
+                    final boolean reportFailure =
+                            loadOperation.permitsPublication();
+                    loadOperation.cancel();
+                    if (reportFailure) {
+                        throw new RuntimeException(taskTriples.getException());
+                    }
                 });
 
-                executor.execute(taskTriples);
+                loadOperation.track(taskTriples);
+                try {
+                    executor.execute(taskTriples);
+                } catch (final RejectedExecutionException exception) {
+                    loadOperation.cancel();
+                    throw exception;
+                }
 
                 progressTriples.incrementWindowCount(progressWindows);
                 showProgressWindow(progressTriples);
@@ -5654,6 +6006,55 @@ public final class Viewer {
         }
     }
 
+    private void fillCommittedScreen(final ExecutorService executor) {
+        final CommittedRaster raster = committedRaster;
+        if (raster == null || raster.generation != renderGeneration.get()) {
+            // abdul 27/07/2026 [wait for one current render generation before inspecting or persisting a screen fill]
+            renderRegions(
+                    onScreenSequences, guideLinesImageView,
+                    regionsImageView, executor,
+                    () -> fillCommittedScreen(executor),
+                    exception -> {
+                        final Alert alert = new Alert(AlertType.ERROR);
+                        alert.setTitle("Fill Screen");
+                        alert.setHeaderText("Unable to render the current view");
+                        alert.setContentText(Objects.toString(
+                                exception.getMessage(),
+                                exception.getClass().getSimpleName()));
+                        alert.showAndWait();
+                    });
+            return;
+        }
+
+        final PixelReader reader = raster.image.getPixelReader();
+        final int numHoles = CommittedRasterScanner.countTransparent(
+                SIDE, reader::getArgb);
+        boolean approved = numHoles == 0;
+        if (!approved) {
+            final Alert alert = new Alert(AlertType.CONFIRMATION);
+            alert.setTitle("Fill Screen");
+            alert.setHeaderText("Fill Screen");
+            alert.setContentText(
+                    "This area contains holes. Are you sure you want to fill the screen?");
+            final Optional<ButtonType> response = alert.showAndWait();
+            approved = response.isPresent()
+                    && response.get() == ButtonType.OK;
+        }
+        if (!approved) {
+            return;
+        }
+
+        if (committedRaster != raster
+                || raster.generation != renderGeneration.get()) {
+            fillCommittedScreen(executor);
+            return;
+        }
+        screenFills.add(raster.camera.getViewRectangle());
+        renderRegions(
+                onScreenSequences, guideLinesImageView,
+                regionsImageView, executor);
+    }
+
     // returns the first location of a hole which is not in the already list
     private Optional<Vector2> findHole(
             final int x0, final int x1, final int y0, final int y1, final ConvexPolygon area) {
@@ -5662,40 +6063,44 @@ public final class Viewer {
 
     private Optional<Vector2> findHole(final int xMin, final int xMax, final int yMin,
                                        final int yMax, final ConvexPolygon area, final FastList<Vector2> already) {
-        final Image image = regionsImageView.getImage();
-        final PixelReader reader = image.getPixelReader();
-        for (int pixelX = xMin; pixelX < xMax; pixelX += 1) {
-            for (int pixelY = yMin; pixelY < yMax; pixelY += 1) {
-                final int color = reader.getArgb(pixelX, pixelY);
-                if (color == 0) {
-                    final double rx = map.radianX(pixelX + 0.5);
-                    final double ry = map.radianY(pixelY + 0.5);
-                    if (area.location(rx, ry).equals(Location.INSIDE)) {
-                        final Vector2 vect = Vector2.create(rx, ry);
-                        if (!already.contains(vect)) {
-                            return Optional.of(vect);
-                        }
-                    }
-                }
-            }
+        final CommittedRaster raster = committedRaster;
+        if (raster == null) {
+            return Optional.empty();
         }
-        return Optional.empty();
+        return findHole(
+                xMin, xMax, yMin, yMax, area, already, raster);
+    }
+
+    private Optional<Vector2> findHole(
+            final int xMin, final int xMax,
+            final int yMin, final int yMax,
+            final ConvexPolygon area,
+            final FastList<Vector2> already,
+            final CommittedRaster raster) {
+        final PixelReader reader = raster.image.getPixelReader();
+        return CommittedRasterScanner.firstHole(
+                SIDE, xMin, xMax, yMin, yMax, area, already,
+                raster.camera, reader::getArgb);
     }
 
     private FastList<Vector2> findHoles(final ConvexPolygon area) {
-
-        final Image image = regionsImageView.getImage();
-        final PixelReader reader = image.getPixelReader();
-
         final FastList<Vector2> list = new FastList<>();
+        final CommittedRaster raster = committedRaster;
+        if (raster == null) {
+            return list;
+        }
+        // abdul 27/07/2026 [scan a committed image-camera pair so camera changes cannot reinterpret old pixels]
+        final PixelReader reader = raster.image.getPixelReader();
 
         for (int pixelX = 0; pixelX < SIDE; pixelX += 1) {
             for (int pixelY = 0; pixelY < SIDE; pixelY += 1) {
                 final int color = reader.getArgb(pixelX, pixelY);
 
                 if (color == 0) {
-                    final double rx = map.radianX(pixelX + 0.5);
-                    final double ry = map.radianY(pixelY + 0.5);
+                    final double rx =
+                            raster.camera.radianX(pixelX + 0.5);
+                    final double ry =
+                            raster.camera.radianY(pixelY + 0.5);
                     if (area.location(rx, ry).equals(Location.INSIDE)) {
                         final Vector2 coords =
                                 Vector2.create(Math.toDegrees(rx), Math.toDegrees(ry));
@@ -5753,11 +6158,14 @@ public final class Viewer {
     }
 
     private WritableImage redoFromScratch(
-            final LinkedHashMap<Storage, Color> regions,
-            final ExecutorService executor,
-            final RenderOptions options) {
-        // only depends on map
-        final Rectangle viewRectangle = map.getViewRectangle();
+            final RenderSnapshot snapshot,
+            final ExecutorService executor) {
+        final PixelRadianMap renderMap = snapshot.camera;
+        final LinkedHashMap<Storage, Color> regions =
+                snapshot.regions;
+        final RenderOptions options = snapshot.options;
+        final Rectangle viewRectangle =
+                renderMap.getViewRectangle();
 
         final List<Storage.Stable> stableRegions = new ArrayList<>();
         final List<Storage.Unstable> unstableRegions = new ArrayList<>();
@@ -5779,18 +6187,18 @@ public final class Viewer {
         // iterate across each axis and get the x and y radian coordinates for the pixels
         final double[] rxs = new double[SIDE];
         for (int pixelX = 0; pixelX < SIDE; pixelX += 1) {
-            final double rx = map.radianX(pixelX + 0.5);
+            final double rx = renderMap.radianX(pixelX + 0.5);
             rxs[pixelX] = rx;
         }
 
         final double[] rys = new double[SIDE];
         for (int pixelY = 0; pixelY < SIDE; pixelY += 1) {
-            final double ry = map.radianY(pixelY + 0.5);
+            final double ry = renderMap.radianY(pixelY + 0.5);
             rys[pixelY] = ry;
         }
 
-        final double halfWidth = map.pixelSize() / 2;
-        final double offset = getOffset();
+        final double halfWidth = renderMap.pixelSize() / 2;
+        final double offset = snapshot.offset;
 
         final Color[][] colors = new Color[SIDE][SIDE];
 
@@ -5846,8 +6254,8 @@ public final class Viewer {
         for (int pixelX = 0; pixelX < SIDE; pixelX += 1) {
             for (int pixelY = 0; pixelY < SIDE; pixelY += 1) {
                 if (options.boundsSelected) {
-                    double rx = map.radianX(pixelX + 0.5);
-                    double ry = map.radianY(pixelY + 0.5);
+                    double rx = renderMap.radianX(pixelX + 0.5);
+                    double ry = renderMap.radianY(pixelY + 0.5);
                     if (options.allSelected) {
                         final List<Double> subList = Arrays.asList(rx, ry, Math.PI - (rx + ry));
                         Collections.sort(subList);
@@ -5866,26 +6274,36 @@ public final class Viewer {
         }
 
         if (options.showFillsSelected) {
-            drawFills(writer);
+            drawFills(writer, snapshot.fills, renderMap);
         }
 
         // Now draw the unstable ones in serial
         unstableRegions.forEach(
-                unstable -> renderUnstable(unstable, writer, viewRectangle, regions.get(unstable), options));
+                unstable -> renderUnstable(
+                        unstable, writer, viewRectangle,
+                        regions.get(unstable), options, renderMap,
+                        snapshot.offset));
 
         return regionImage;
     }
 
-    private void drawFills(final PixelWriter writer) {
+    private void drawFills(
+            final PixelWriter writer,
+            final List<Rectangle> fills,
+            final PixelRadianMap renderMap) {
 
-        for (final Rectangle rect : screenFills) {
+        for (final Rectangle rect : fills) {
 
             // This is the intersection of the boxes
-            final int minX = Math.max((int) Math.ceil(map.pixelX(rect.intervalX.min)), 0);
-            final int maxX = Math.min((int) Math.floor(map.pixelX(rect.intervalX.max)), SIDE);
+            final int minX = Math.max((int) Math.ceil(
+                    renderMap.pixelX(rect.intervalX.min)), 0);
+            final int maxX = Math.min((int) Math.floor(
+                    renderMap.pixelX(rect.intervalX.max)), SIDE);
 
-            final int minY = Math.max((int) Math.ceil(map.pixelY(rect.intervalY.min)), 0);
-            final int maxY = Math.min((int) Math.floor(map.pixelY(rect.intervalY.max)), SIDE);
+            final int minY = Math.max((int) Math.ceil(
+                    renderMap.pixelY(rect.intervalY.min)), 0);
+            final int maxY = Math.min((int) Math.floor(
+                    renderMap.pixelY(rect.intervalY.max)), SIDE);
 
             for (int x = minX; x < maxX; ++x) {
                 for (int y = minY; y < maxY; ++y) {
@@ -5916,7 +6334,10 @@ public final class Viewer {
                                final ImageView guideLinesImageView, final ImageView regionsImageView,
                                final ExecutorService executor, final Runnable afterCommit,
                                final Consumer<RuntimeException> onFailure) {
-        final RenderOptions options = snapshotRenderOptions();
+        final long generation = renderGeneration.incrementAndGet();
+        // abdul 27/07/2026 [capture every render input on JavaFX before any background pixel work]
+        final RenderSnapshot snapshot =
+                snapshotRenderState(regions);
 
         // Coalescing is deliberately limited to the long-lived viewer executor.
         // Several AutoVary/cover paths pass short-lived draw executors and then
@@ -5924,7 +6345,10 @@ public final class Viewer {
         // synchronous so progress-saving cancel paths still finish deterministically.
         if (!Utils.renderCoalescing || executor != executorService) {
             try {
-                commitRenderedImages(buildRenderedImages(regions, executor, options), guideLinesImageView, regionsImageView);
+                commitRenderedImages(
+                        buildRenderedImages(snapshot, executor),
+                        snapshot, generation, guideLinesImageView,
+                        regionsImageView);
                 if (afterCommit != null) {
                     // Coalescing is disabled for --threads=1. Defer the
                     // continuation so a long run of covered/empty coordinates
@@ -5940,20 +6364,16 @@ public final class Viewer {
             return;
         }
 
-        final long generation = renderGeneration.incrementAndGet();
         final Future<?> previousRender = renderFuture;
         if (previousRender != null) {
             previousRender.cancel(true);
         }
 
-        // Snapshot the map because UI callbacks may add/remove regions while a
-        // background redraw is still computing pixels for the previous view.
-        final LinkedHashMap<Storage, Color> regionsCopy = new LinkedHashMap<>(regions);
         try {
             renderFuture = executor.submit(() -> {
                 final RenderedImages images;
                 try {
-                    images = buildRenderedImages(regionsCopy, executor, options);
+                    images = buildRenderedImages(snapshot, executor);
                 } catch (final RuntimeException e) {
                     if (Thread.currentThread().isInterrupted()
                             || generation != renderGeneration.get()
@@ -5974,7 +6394,9 @@ public final class Viewer {
                 Platform.runLater(() -> {
                     if (generation == renderGeneration.get()) {
                         try {
-                            commitRenderedImages(images, guideLinesImageView, regionsImageView);
+                            commitRenderedImages(
+                                    images, snapshot, generation,
+                                    guideLinesImageView, regionsImageView);
                             if (afterCommit != null) {
                                 afterCommit.run();
                             }
@@ -6007,63 +6429,109 @@ public final class Viewer {
                 proverCheckBox.isSelected());
     }
 
+    private RenderSnapshot snapshotRenderState(
+            final LinkedHashMap<Storage, Color> regions) {
+        final ArrayList<ColoredRectangle> coverRectangles =
+                new ArrayList<>();
+        final ArrayList<Rectangle> rectangles = new ArrayList<>();
+        rectangles.addAll(coverRects.tripleEntrySet());
+        rectangles.addAll(coverRects.HalfTripleEntrySet());
+        rectangles.addAll(coverRects.stableEntrySet());
+        rectangles.sort(Comparator.comparingDouble(
+                rectangle -> rectangle.intervalX.max
+                        - rectangle.intervalX.min));
+        for (final Rectangle rectangle : rectangles) {
+            coverRectangles.add(new ColoredRectangle(
+                    rectangle, coverRects.getColor(rectangle)));
+        }
+
+        final ArrayList<ColoredPolygon> boundPolygons =
+                new ArrayList<>();
+        for (final ConvexPolygon polygon : innerPolyBounds) {
+            boundPolygons.add(new ColoredPolygon(
+                    polygon, polyBoundColor));
+        }
+        for (final ConvexPolygon polygon : outerPolyBounds) {
+            boundPolygons.add(new ColoredPolygon(
+                    polygon, polyBoundColor));
+        }
+        coverArea.ifPresent(polygon -> boundPolygons.add(
+                new ColoredPolygon(polygon, coverAreaColor)));
+        smallCoverAreas.forEach(polygon -> boundPolygons.add(
+                new ColoredPolygon(polygon, coverAreaColor)));
+        autoVaryArea.ifPresent(polygon -> boundPolygons.add(
+                new ColoredPolygon(polygon, coverAreaColor)));
+        for (final Entry<ConvexPolygon, Color> entry
+                : mrrBounds.entrySet()) {
+            final Color color = entry.getValue().equals(Color.BLACK)
+                    || entry.getValue().equals(Color.TRANSPARENT)
+                    ? coverPolyBoundColor : entry.getValue();
+            boundPolygons.add(new ColoredPolygon(
+                    entry.getKey(), color));
+        }
+
+        return new RenderSnapshot(
+                new PixelRadianMap(map),
+                new LinkedHashMap<>(regions),
+                snapshotRenderOptions(),
+                getOffset(),
+                List.copyOf(screenFills),
+                List.copyOf(coverRectangles),
+                List.copyOf(boundPolygons),
+                currentOBOStorage,
+                currentOBOColor);
+    }
+
     private RenderedImages buildRenderedImages(
-            final LinkedHashMap<Storage, Color> regions,
-            final ExecutorService executor,
-            final RenderOptions options) {
+            final RenderSnapshot snapshot,
+            final ExecutorService executor) {
         // Image 1: Guidelines
-        final WritableImage guideLinesImage = renderGuideLines();
+        final WritableImage guideLinesImage =
+                renderGuideLines(snapshot.camera);
 
         // Image 2: Regions
-        final WritableImage regionImage = redoFromScratch(regions, executor, options);
+        final WritableImage regionImage =
+                redoFromScratch(snapshot, executor);
 
         // Zhao Yu Li, Jul 29, 2025.
         // Squares are optionally rendered (whereas they were unconditionally rendered before).
         // Updated Jul 30, 205.
         // It is okay to unconditionally render the squares as it does not significantly impact the execution time
         // if (renderSquares) {
-        ArrayList<Rectangle> rectangles = new ArrayList<>();
-        rectangles.addAll(coverRects.tripleEntrySet());
-        rectangles.addAll(coverRects.HalfTripleEntrySet());
-        rectangles.addAll(coverRects.stableEntrySet());
-        rectangles.sort(Comparator.comparingDouble(o -> o.intervalX.max - o.intervalX.min));
-        for (Rectangle rect : rectangles) {
-            renderRectLoad(rect, regionImage, coverRects.getColor(rect), Color.FIREBRICK, options);
+        for (final ColoredRectangle rectangle
+                : snapshot.coverRectangles) {
+            renderRectLoad(
+                    rectangle.rectangle, regionImage, rectangle.color,
+                    Color.FIREBRICK, snapshot.options,
+                    snapshot.camera);
         }
         // }
 
         // Image 3: Bounds
         final WritableImage boundsImage = new WritableImage(SIDE, SIDE);
-        for (final ConvexPolygon poly : innerPolyBounds) {
-            renderPolygon(poly, boundsImage, polyBoundColor);
-        }
-        for (final ConvexPolygon poly : outerPolyBounds) {
-            renderPolygon(poly, boundsImage, polyBoundColor);
-        }
-        coverArea.ifPresent(convexPolygon -> renderPolygon(convexPolygon, boundsImage, coverAreaColor));
-        smallCoverAreas.forEach(convexPolygon -> renderPolygon(convexPolygon, boundsImage, coverAreaColor));
-        autoVaryArea.ifPresent(convexPolygon -> renderPolygon(convexPolygon, boundsImage, coverAreaColor));
-        for (final Entry<ConvexPolygon, Color> poly : mrrBounds.entrySet()) {
-            final Color color;
-            if (poly.getValue().equals(Color.BLACK) || poly.getValue().equals(Color.TRANSPARENT)) {
-                color = coverPolyBoundColor;
-            } else {
-                color = poly.getValue();
-            }
-            renderPolygon(poly.getKey(), boundsImage, color);
+        for (final ColoredPolygon polygon : snapshot.boundPolygons) {
+            renderPolygon(
+                    polygon.polygon, boundsImage, polygon.color,
+                    snapshot.camera);
         }
 
         // Image 4: One-by-One
         final WritableImage oboImage = new WritableImage(SIDE, SIDE);
-        if (currentOBOStorage != null) {
-            renderRegion(currentOBOStorage, oboImage, currentOBOColor, options);
+        if (snapshot.oboStorage != null) {
+            renderRegion(
+                    snapshot.oboStorage, oboImage, snapshot.oboColor,
+                    snapshot.options, snapshot.camera, snapshot.offset);
         }
 
         return new RenderedImages(guideLinesImage, regionImage, boundsImage, oboImage);
     }
 
     private void commitRenderedImages(
-            final RenderedImages images, final ImageView guideLinesImageView, final ImageView regionsImageView) {
+            final RenderedImages images,
+            final RenderSnapshot snapshot,
+            final long generation,
+            final ImageView guideLinesImageView,
+            final ImageView regionsImageView) {
         // Update all the images at once to avoid jarring rendering. Only this
         // method touches the JavaFX ImageViews; buildRenderedImages can run in
         // the background while it prepares detached WritableImages.
@@ -6071,6 +6539,15 @@ public final class Viewer {
         regionsImageView.setImage(images.regionImage);
         boundsImageView.setImage(images.boundsImage);
         oboImageView.setImage(images.oboImage);
+        // abdul 27/07/2026 [commit every incrementally mutable raster with the exact camera, options, and offset that produced it]
+        committedRaster = new CommittedRaster(
+                images.regionImage,
+                images.boundsImage,
+                images.oboImage,
+                new PixelRadianMap(snapshot.camera),
+                snapshot.options,
+                snapshot.offset,
+                generation);
     }
 
     private static final class RenderOptions {
@@ -6106,6 +6583,61 @@ public final class Viewer {
             this.regionImage = regionImage;
             this.boundsImage = boundsImage;
             this.oboImage = oboImage;
+        }
+    }
+
+    private static final class RenderSnapshot {
+        final PixelRadianMap camera;
+        final LinkedHashMap<Storage, Color> regions;
+        final RenderOptions options;
+        final double offset;
+        final List<Rectangle> fills;
+        final List<ColoredRectangle> coverRectangles;
+        final List<ColoredPolygon> boundPolygons;
+        final Storage oboStorage;
+        final Color oboColor;
+
+        RenderSnapshot(
+                final PixelRadianMap camera,
+                final LinkedHashMap<Storage, Color> regions,
+                final RenderOptions options,
+                final double offset,
+                final List<Rectangle> fills,
+                final List<ColoredRectangle> coverRectangles,
+                final List<ColoredPolygon> boundPolygons,
+                final Storage oboStorage,
+                final Color oboColor) {
+            this.camera = camera;
+            this.regions = regions;
+            this.options = options;
+            this.offset = offset;
+            this.fills = fills;
+            this.coverRectangles = coverRectangles;
+            this.boundPolygons = boundPolygons;
+            this.oboStorage = oboStorage;
+            this.oboColor = oboColor;
+        }
+    }
+
+    private record ColoredRectangle(Rectangle rectangle, Color color) {
+    }
+
+    private record ColoredPolygon(ConvexPolygon polygon, Color color) {
+    }
+
+    private record CommittedRaster(
+            Image image,
+            Image boundsImage,
+            Image oboImage,
+            PixelRadianMap camera,
+            RenderOptions options,
+            double offset,
+            long generation) {
+        boolean owns(final Image candidate) {
+            // abdul 27/07/2026 [recognize every displayed image that shares this committed camera context]
+            return image == candidate
+                    || boundsImage == candidate
+                    || oboImage == candidate;
         }
     }
 
@@ -6255,11 +6787,19 @@ public final class Viewer {
 
     private void drawHorizontalLine(final double y, final double x1, final double x2,
                                     final PixelWriter pixelWriter, final Color color) {
-        final int pixelY = (int) map.pixelY(y);
+        drawHorizontalLine(y, x1, x2, pixelWriter, color, map);
+    }
+
+    private void drawHorizontalLine(
+            final double y, final double x1, final double x2,
+            final PixelWriter pixelWriter, final Color color,
+            final PixelRadianMap renderMap) {
+        final int pixelY = (int) renderMap.pixelY(y);
 
         if (0 <= pixelY && pixelY < SIDE) {
             for (int pixelX = 0; pixelX < SIDE; pixelX += 1) {
-                final double radianX = map.radianX(pixelX + 0.5);
+                final double radianX =
+                        renderMap.radianX(pixelX + 0.5);
                 if (x1 <= radianX && radianX <= x2) {
                     pixelWriter.setColor(pixelX, pixelY, color);
                 }
@@ -6271,11 +6811,19 @@ public final class Viewer {
     // Pixels go from 0 to 599, as usual (not 600!)
     private void drawVerticalLine(final double x, final double y1, final double y2,
                                   final PixelWriter pixelWriter, final Color color) {
-        final int pixelX = (int) map.pixelX(x);
+        drawVerticalLine(x, y1, y2, pixelWriter, color, map);
+    }
+
+    private void drawVerticalLine(
+            final double x, final double y1, final double y2,
+            final PixelWriter pixelWriter, final Color color,
+            final PixelRadianMap renderMap) {
+        final int pixelX = (int) renderMap.pixelX(x);
 
         if (0 <= pixelX && pixelX < SIDE) {
             for (int pixelY = 0; pixelY < SIDE; pixelY += 1) {
-                final double radianY = map.radianY(pixelY + 0.5);
+                final double radianY =
+                        renderMap.radianY(pixelY + 0.5);
                 if (y1 <= radianY && radianY <= y2) {
                     pixelWriter.setColor(pixelX, pixelY, color);
                 }
@@ -6286,14 +6834,24 @@ public final class Viewer {
     private void drawObliqueLine(final DoubleUnaryOperator y, final double x1, final double x2,
                                  final DoubleUnaryOperator x, final double y1, final double y2,
                                  final PixelWriter pixelWriter, final Color color) {
+        drawObliqueLine(
+                y, x1, x2, x, y1, y2, pixelWriter, color, map);
+    }
+
+    private void drawObliqueLine(
+            final DoubleUnaryOperator y, final double x1,
+            final double x2, final DoubleUnaryOperator x,
+            final double y1, final double y2,
+            final PixelWriter pixelWriter, final Color color,
+            final PixelRadianMap renderMap) {
 
         // let's iterate across the x values
         for (int pixelX = 0; pixelX < SIDE; pixelX += 1) {
-            final double radianX = map.radianX(pixelX);
+            final double radianX = renderMap.radianX(pixelX);
             final double radianY = y.applyAsDouble(radianX);
 
             if (y1 <= radianY && radianY <= y2) {
-                final int pixelY = (int) map.pixelY(radianY);
+                final int pixelY = (int) renderMap.pixelY(radianY);
 
                 if (0 <= pixelY && pixelY < SIDE) {
                     pixelWriter.setColor(pixelX, pixelY, color);
@@ -6303,12 +6861,12 @@ public final class Viewer {
 
         // now iterate over the rows
         for (int pixelY = 0; pixelY < SIDE; pixelY += 1) {
-            final double radianY = map.radianY(pixelY);
+            final double radianY = renderMap.radianY(pixelY);
             final double radianX = x.applyAsDouble(radianY);
 
             // is it part of the line segment?
             if (x1 <= radianX && radianX <= x2) {
-                final int pixelX = (int) map.pixelX(radianX);
+                final int pixelX = (int) renderMap.pixelX(radianX);
 
                 // is it on screen?
                 if (0 <= pixelX && pixelX < SIDE) {
@@ -6318,20 +6876,21 @@ public final class Viewer {
         }
     }
 
-    private WritableImage renderGuideLines() {
+    private WritableImage renderGuideLines(
+            final PixelRadianMap renderMap) {
         // render the lines in the background image
         final WritableImage image = new WritableImage(SIDE, SIDE);
         final PixelWriter pixelWriter = image.getPixelWriter();
 
         // we have several horizontal lines, several vertical lines, and oblique ones
-        drawHorizontalLine(0, 0, Math.PI, pixelWriter, lineColor);
-        drawVerticalLine(0, 0, Math.PI, pixelWriter, lineColor);
+        drawHorizontalLine(0, 0, Math.PI, pixelWriter, lineColor, renderMap);
+        drawVerticalLine(0, 0, Math.PI, pixelWriter, lineColor, renderMap);
 
-        drawHorizontalLine(Math.PI / 2, 0, Math.PI / 2, pixelWriter, lineColor);
-        drawVerticalLine(Math.PI / 2, 0, Math.PI / 2, pixelWriter, lineColor);
+        drawHorizontalLine(Math.PI / 2, 0, Math.PI / 2, pixelWriter, lineColor, renderMap);
+        drawVerticalLine(Math.PI / 2, 0, Math.PI / 2, pixelWriter, lineColor, renderMap);
 
         // this is the line y = 67.5 from x = 0 to x= 0.5
-        drawHorizontalLine(3 * Math.PI / 8, 0, Math.PI / 360, pixelWriter, lineColor);
+        drawHorizontalLine(3 * Math.PI / 8, 0, Math.PI / 360, pixelWriter, lineColor, renderMap);
 
         /*
         drawObliqueLine(x -> x, 0, Math.PI / 2,
@@ -6340,90 +6899,113 @@ public final class Viewer {
          */
 
         // x = 12 degrees
-        drawVerticalLine(Math.PI / 15, Math.PI / 15, 37 * Math.PI / 120, pixelWriter, lineColor);
+        drawVerticalLine(Math.PI / 15, Math.PI / 15, 37 * Math.PI / 120, pixelWriter, lineColor, renderMap);
 
         // x + y = 90
         drawObliqueLine(x
                         -> Math.PI / 2 - x,
-                0, Math.PI / 2, y -> Math.PI / 2 - y, 0, Math.PI / 2, pixelWriter, lineColor);
+                0, Math.PI / 2, y -> Math.PI / 2 - y, 0, Math.PI / 2, pixelWriter, lineColor, renderMap);
 
         // x + y = 180
         drawObliqueLine(
-                x -> Math.PI - x, 0, Math.PI, y -> Math.PI - y, 0, Math.PI, pixelWriter, lineColor);
+                x -> Math.PI - x, 0, Math.PI, y -> Math.PI - y, 0, Math.PI, pixelWriter, lineColor, renderMap);
 
         // IMPORTANT: This is the line x + y = 80
         drawObliqueLine(x
                         -> 4 * Math.PI / 9 - x,
                 0, 4 * Math.PI / 9,
-                y -> 4 * Math.PI / 9 - y, 0, 4 * Math.PI / 9, pixelWriter, lineColor);
+                y -> 4 * Math.PI / 9 - y, 0, 4 * Math.PI / 9, pixelWriter, lineColor, renderMap);
 
         // IMPORTANT: This is the line x + y = 75
         drawObliqueLine(x
                         -> 15 * Math.PI / 36 - x,
                 0, 15 * Math.PI / 36,
-                y -> 15 * Math.PI / 36 - y, 0, 15 * Math.PI / 36, pixelWriter, lineColor);
+                y -> 15 * Math.PI / 36 - y, 0, 15 * Math.PI / 36, pixelWriter, lineColor, renderMap);
 
         // IMPORTANT: This is the line x + y = 70
         drawObliqueLine(x
                         -> 7 * Math.PI / 18 - x,
                 0, 7 * Math.PI / 18,
-                y -> 7 * Math.PI / 18 - y, 0, 7 * Math.PI / 18, pixelWriter, lineColor);
+                y -> 7 * Math.PI / 18 - y, 0, 7 * Math.PI / 18, pixelWriter, lineColor, renderMap);
 
         // IMPORTANT: This is the line x + y = 68
         drawObliqueLine(x
                         -> 17 * Math.PI / 45 - x,
                 0, 17 * Math.PI / 45,
-                y -> 17 * Math.PI / 45 - y, 0, 17 * Math.PI / 45, pixelWriter, lineColor);
+                y -> 17 * Math.PI / 45 - y, 0, 17 * Math.PI / 45, pixelWriter, lineColor, renderMap);
 
         // This is the line x + y = 67.7
         drawObliqueLine(x
                         -> 677 * Math.PI / 1800 - x,
                 0, 677 * Math.PI / 1800,
-                y -> 677 * Math.PI / 1800 - y, 0, 677 * Math.PI / 1800, pixelWriter, lineColor);
+                y -> 677 * Math.PI / 1800 - y, 0, 677 * Math.PI / 1800, pixelWriter, lineColor, renderMap);
 
         // This is the line x + y = 67.6
         drawObliqueLine(x
                         -> 169 * Math.PI / 450 - x,
                 0, 169 * Math.PI / 450,
-                y -> 169 * Math.PI / 450 - y, 0, 169 * Math.PI / 450, pixelWriter, lineColor);
+                y -> 169 * Math.PI / 450 - y, 0, 169 * Math.PI / 450, pixelWriter, lineColor, renderMap);
 
         // This is the line x + y = 67.55
         drawObliqueLine(x
                         -> 1351 * Math.PI / 3600 - x,
                 0, 1351 * Math.PI / 3600,
-                y -> 1351 * Math.PI / 3600 - y, 0, 1351 * Math.PI / 3600, pixelWriter, lineColor);
+                y -> 1351 * Math.PI / 3600 - y, 0, 1351 * Math.PI / 3600, pixelWriter, lineColor, renderMap);
 
         // This is the line x + y = 67.5
         drawObliqueLine(x
                         -> 15 * Math.PI / 40 - x,
                 0, 15 * Math.PI / 40,
-                y -> 15 * Math.PI / 40 - y, 0, 15 * Math.PI / 40, pixelWriter, lineColor);
+                y -> 15 * Math.PI / 40 - y, 0, 15 * Math.PI / 40, pixelWriter, lineColor, renderMap);
 
         // IMPORTANT: This is the line x + y = 66
         drawObliqueLine(x
                         -> 11 * Math.PI / 30 - x,
                 0, 11 * Math.PI / 30,
-                y -> 11 * Math.PI / 30 - y, 0, 11 * Math.PI / 30, pixelWriter, lineColor);
+                y -> 11 * Math.PI / 30 - y, 0, 11 * Math.PI / 30, pixelWriter, lineColor, renderMap);
 
         // IMPORTANT: This is the line x + y = 45
         drawObliqueLine(x
                         -> Math.PI / 4 - x,
-                0, Math.PI / 4, y -> Math.PI / 4 - y, 0, Math.PI / 4, pixelWriter, lineColor);
+                0, Math.PI / 4, y -> Math.PI / 4 - y, 0, Math.PI / 4, pixelWriter, lineColor, renderMap);
 
         // IMPORTANT: This is the line x + y = 35
         drawObliqueLine(x
                         -> 35 * Math.PI / 180 - x,
                 0, 35 * Math.PI / 180,
-                y -> 35 * Math.PI / 180 - y, 0, 35 * Math.PI / 180, pixelWriter, lineColor);
+                y -> 35 * Math.PI / 180 - y, 0, 35 * Math.PI / 180, pixelWriter, lineColor, renderMap);
 
         // IMPORTANT: This is the line x = y
-        drawObliqueLine(x -> x, 0, Math.PI / 4, y -> y, 0, Math.PI / 4, pixelWriter, lineColor);
+        drawObliqueLine(x -> x, 0, Math.PI / 4, y -> y, 0, Math.PI / 4, pixelWriter, lineColor, renderMap);
 
         return image;
     }
 
     private void renderPolygon(
             final ConvexPolygon poly, final WritableImage image, final Color color) {
+        final CommittedRaster raster = committedRaster;
+        final boolean ownsImage = raster != null && raster.owns(image);
+        if (image == boundsImageView.getImage()
+                && (raster == null
+                || !CommittedRasterScanner.canMutateCommittedRaster(
+                        raster.generation, renderGeneration.get(),
+                        ownsImage))) {
+            // abdul 27/07/2026 [rebuild all bounds when a pending camera snapshot would otherwise overwrite an incremental polygon]
+            renderRegions(
+                    onScreenSequences, guideLinesImageView,
+                    regionsImageView, executorService);
+            return;
+        }
+        // abdul 27/07/2026 [keep incremental bounds drawing on the camera committed with the displayed bounds raster]
+        final PixelRadianMap renderMap =
+                ownsImage
+                        ? raster.camera : new PixelRadianMap(map);
+        renderPolygon(poly, image, color, renderMap);
+    }
+
+    private void renderPolygon(
+            final ConvexPolygon poly, final WritableImage image,
+            final Color color, final PixelRadianMap renderMap) {
         final PixelWriter pixelWriter = image.getPixelWriter();
 
         final ImmutableList<Vector2> vertices = poly.vertices;
@@ -6435,11 +7017,11 @@ public final class Viewer {
 
             // horizontal
             if (a.y == b.y) {
-                drawHorizontalLine(a.y, Math.min(a.x, b.x), Math.max(a.x, b.x), pixelWriter, color);
+                drawHorizontalLine(a.y, Math.min(a.x, b.x), Math.max(a.x, b.x), pixelWriter, color, renderMap);
             }
             // vertical
             else if (a.x == b.x) {
-                drawVerticalLine(a.x, Math.min(a.y, b.y), Math.max(a.y, b.y), pixelWriter, color);
+                drawVerticalLine(a.x, Math.min(a.y, b.y), Math.max(a.y, b.y), pixelWriter, color, renderMap);
             }
             // diagonal
             else {
@@ -6450,7 +7032,7 @@ public final class Viewer {
                 final DoubleUnaryOperator funcX = y -> slopeX * (y - a.y) + a.x; // x(y)
 
                 drawObliqueLine(funcY, Math.min(a.x, b.x), Math.max(a.x, b.x), funcX,
-                        Math.min(a.y, b.y), Math.max(a.y, b.y), pixelWriter, color);
+                        Math.min(a.y, b.y), Math.max(a.y, b.y), pixelWriter, color, renderMap);
             }
         }
     }
@@ -6602,24 +7184,22 @@ public final class Viewer {
 
     private void renderRectLoad(final Rectangle rect, final WritableImage image,
                                 final Color colorInside, final Color colorBound,
-                                final RenderOptions options) {
+                                final RenderOptions options,
+                                final PixelRadianMap renderMap) {
 
         final PixelWriter pixelWriter = image.getPixelWriter();
         final PixelReader pixelReader = image.getPixelReader();
-        final int startPX = Math.max((int) map.pixelX(rect.intervalX.min), 0);
-        final int startPY = Math.max((int) map.pixelY(rect.intervalY.min), 0);
-        final int endPX = Math.min((int) map.pixelX(rect.intervalX.max), SIDE);
-        final int endPY = Math.min((int) map.pixelY(rect.intervalY.max), SIDE);
+        final int startPX = Math.max((int) renderMap.pixelX(rect.intervalX.min), 0);
+        final int startPY = Math.max((int) renderMap.pixelY(rect.intervalY.min), 0);
+        final int endPX = Math.min((int) renderMap.pixelX(rect.intervalX.max), SIDE);
+        final int endPY = Math.min((int) renderMap.pixelY(rect.intervalY.max), SIDE);
 
         if (!options.allSelected) {
             for (int i = startPX; i <= endPX; i++) {
                 for (int j = startPY; j <= endPY; j++) {
                     if (SIDE > i && i >= 0 && SIDE > j && j >= 0) {
-                        double rx = map.radianX(i);
-                        double ry = map.radianY(j);
-                        if (coverArea.isPresent() && coverArea.get().location(rx, ry) == Location.OUTSIDE) {
-                            //continue;
-                        }
+                        double rx = renderMap.radianX(i);
+                        double ry = renderMap.radianY(j);
                         try {
                             if(pixelReader.getColor(i, j) != colorInside && pixelReader.getColor(i, j) != colorBound) {
                                 if ((i == startPX || i == endPX || j == startPY || j == endPY)) {
@@ -6639,18 +7219,18 @@ public final class Viewer {
         else {
             for (int i = startPX; i <= endPX; i++) {
                 for (int j = startPY; j <= endPY; j++) {
-                    double rx = map.radianX(i);
-                    double ry = map.radianY(j);
+                    double rx = renderMap.radianX(i);
+                    double ry = renderMap.radianY(j);
                     final double rz = Math.PI - (rx + ry);
                     final double[][] coords = { {rx, rz}, {ry, rz}, {rz, rx}, {rz, ry}, {ry, rx}, {rx, ry}};
                     if (SIDE > i && i >= 0 && SIDE > j && j >= 0) {
                         if ((i == startPX || i == endPX || j == startPY || j == endPY)) {
                             try {
                                 for (final double[] coord : coords) {
-                                    if (map.getViewRectangle().contains(coord[0], coord[1])) {
+                                    if (renderMap.getViewRectangle().contains(coord[0], coord[1])) {
                                         if (coord[0] > 0 && coord[1] > 0 && (Math.PI - (coord[0] + coord[1])) > 0) {
-                                            final int px = (int) map.pixelX(coord[0]);
-                                            final int py = (int) map.pixelY(coord[1]);
+                                            final int px = (int) renderMap.pixelX(coord[0]);
+                                            final int py = (int) renderMap.pixelY(coord[1]);
                                             pixelWriter.setColor(px, py, colorBound);
                                         }
                                     }
@@ -6661,10 +7241,10 @@ public final class Viewer {
 
                         } else {
                             for (final double[] coord : coords) {
-                                if (map.getViewRectangle().contains(coord[0], coord[1])) {
+                                if (renderMap.getViewRectangle().contains(coord[0], coord[1])) {
                                     if (coord[0] > 0 && coord[1] > 0 && (Math.PI - (coord[0] + coord[1])) > 0) {
-                                        final int px = (int) map.pixelX(coord[0]);
-                                        final int py = (int) map.pixelY(coord[1]);
+                                        final int px = (int) renderMap.pixelX(coord[0]);
+                                        final int py = (int) renderMap.pixelY(coord[1]);
                                         pixelWriter.setColor(px, py, colorInside);
                                     }
                                 }
@@ -6679,6 +7259,19 @@ public final class Viewer {
     private void renderUnstable(final Storage.Unstable unstable, final PixelWriter pixelWriter,
                                 final Rectangle viewRectangle, final Color color,
                                 final RenderOptions options) {
+        renderUnstable(
+                unstable, pixelWriter, viewRectangle, color, options,
+                map, getOffset());
+    }
+
+    private void renderUnstable(
+            final Storage.Unstable unstable,
+            final PixelWriter pixelWriter,
+            final Rectangle viewRectangle,
+            final Color color,
+            final RenderOptions options,
+            final PixelRadianMap map,
+            final double offset) {
         final List<Vector2> points = new ArrayList<>();
 
         final int xCoeff = unstable.constraint.coeff(XYPi.X);
@@ -6686,7 +7279,6 @@ public final class Viewer {
         final int piCoeff = unstable.constraint.coeff(XYPi.Pi);
 
         final double halfWidth = map.pixelSize() / 2;
-        final double offset = getOffset();
 
         int startPixelX = 0;
         int startPixelY = 0;
@@ -6880,14 +7472,38 @@ public final class Viewer {
     }
 
     void renderRegion(final Storage region, final WritableImage image, final Color color) {
-        renderRegion(region, image, color, snapshotRenderOptions());
+        final CommittedRaster raster = committedRaster;
+        final boolean ownsImage = raster != null && raster.owns(image);
+        if (image == regionsImageView.getImage()
+                && (raster == null
+                || !CommittedRasterScanner.canMutateCommittedRaster(
+                        raster.generation, renderGeneration.get(),
+                        ownsImage))) {
+            // abdul 27/07/2026 [replace an unsafe incremental draw with a new complete snapshot when another generation is pending]
+            renderRegions(
+                    onScreenSequences, guideLinesImageView,
+                    regionsImageView, executorService);
+            return;
+        }
+        if (ownsImage) {
+            // abdul 27/07/2026 [increment a committed image only with the camera/options/offset that produced its pixels]
+            renderRegion(
+                    region, image, color, raster.options,
+                    raster.camera, raster.offset);
+            return;
+        }
+        renderRegion(
+                region, image, color, snapshotRenderOptions(),
+                new PixelRadianMap(map), getOffset());
     }
 
     private void renderRegion(
             final Storage region,
             final WritableImage image,
             final Color color,
-            final RenderOptions options) {
+            final RenderOptions options,
+            final PixelRadianMap map,
+            final double offset) {
         final PixelReader pixelReader = image.getPixelReader();
         final PixelWriter pixelWriter = image.getPixelWriter();
 
@@ -6898,7 +7514,6 @@ public final class Viewer {
                 final Storage.Stable stable = (Storage.Stable) region;
 
                 final double halfWidth = map.pixelSize() / 2;
-                final double offset = getOffset();
 
                 // Determine the color of each pixel in a specified row
                 for (int readY = 0; readY < SIDE; readY += 1) {
@@ -6951,7 +7566,9 @@ public final class Viewer {
                     }
                 }
             } else {
-                renderUnstable((Storage.Unstable) region, pixelWriter, viewRectangle, color, options);
+                renderUnstable(
+                        (Storage.Unstable) region, pixelWriter,
+                        viewRectangle, color, options, map, offset);
             }
         }
     }
@@ -7198,6 +7815,7 @@ public final class Viewer {
 
     private MutableSortedSet<ClassifiedCodeSequence> varyLFunction(final MutableSortedSet<ClassifiedCodeSequence> codesFound, final MutableList<Vector2> points,
                                                                    final int[] maximums, final boolean overrideSS, final int max,
+                                                                   final VarySearchRequest searchRequest,
                                                                    final ExecutorService executor2) {
         final int CSmax = maximums[0];
         final int OSOmax = maximums[1];
@@ -7215,7 +7833,10 @@ public final class Viewer {
         for (Vector2 point : points) {
             System.out.println("");
             System.out.println("//------------- working on point " + count + " -------------"); // george added // sept 27,2017
-            final MutableSortedSet<ClassifiedCodeSequence> codes = overrideSS ? boyanMenu.varyTrianglesL(point, CSmaxSS, OSOmaxSS, OSNOmaxSS, executor2) : boyanMenu.varyTrianglesL(point, executor2);
+            // abdul 27/07/2026 [keep the legacy line helper on the same immutable request boundary as VaryLTask]
+            final MutableSortedSet<ClassifiedCodeSequence> codes = overrideSS
+                    ? boyanMenu.varyTrianglesL(point, CSmaxSS, OSOmaxSS, OSNOmaxSS, searchRequest, executor2)
+                    : boyanMenu.varyTrianglesL(point, searchRequest, executor2);
             final MutableSortedSet<ClassifiedCodeSequence> localCodesFound = new TreeSortedSet<>();
 
             int i = max == 0 ? localCodesFound.size() : max;
@@ -7250,10 +7871,14 @@ public final class Viewer {
         return codesFound;
     }
 
-    // Runs polyVary a set number of times 
-    private void superPolyVaryFunction(final Tuple7<ConvexPolygon, Integer, Integer, Integer, Integer, Integer, Integer> polyVals, final ExecutorService executor) {
+    // Runs polyVary a set number of times
+    private void superPolyVaryFunction(
+            final SuperPolyVaryRequest request,
+            final OperationRegistry.OperationHandle operation,
+            final ExecutorService executor) {
         final SimpleObjectProperty<Integer> step = new SimpleObjectProperty<>();
-        final ProgressMultiTask overallProgress = new ProgressMultiTask(superAutoCb.isSelected() ? "AutoPolyVary %d out of %d" : "PolyVary %d out of %d", false, 0, SuperPolyVaryLoad.Reps);
+        final SuperPolyVarySettings settings = request.settings();
+        final ProgressMultiTask overallProgress = new ProgressMultiTask(request.automatic() ? "AutoPolyVary %d out of %d" : "PolyVary %d out of %d", false, 0, settings.repetitions());
         final Array<Color> cycleColors = Array.of(
                 Color.RED, Color.BLUE, Color.GREEN, Color.MAGENTA,
                 Color.CHOCOLATE, Color.ORANGE, Color.PINK, Color.LIME,
@@ -7261,25 +7886,24 @@ public final class Viewer {
 
         step.setValue(-1);
         step.addListener((o, oldVal, newVal) -> {
-            if(oldVal != -1) {
-                final int subdivisions = Integer.parseInt(boyanMenu.autoCycleText.getText());
-                final int subdivStep = Integer.parseInt(boyanMenu.cycleStepText.getText());
-                boyanMenu.autoCycleText.setText(Integer.toString(Math.max(0, subdivisions + subdivStep)));
-            }
-            if(newVal >= SuperPolyVaryLoad.Reps || newVal == -1) {
+            if (!operation.permitsPublication()) {
+                // abdul 28/07/2026 [block SuperPolyVary schedule callbacks after its application generation is terminal]
                 overallProgress.close();
                 return;
             }
+            if(newVal >= settings.repetitions() || newVal == -1) {
+                overallProgress.close();
+                if (newVal >= settings.repetitions()) {
+                    operation.complete();
+                } else {
+                    operation.cancel();
+                }
+                return;
+            }
 
-            // Zhao Yu Li, Jul 08, 2025.
-            // Scale only if the user selected to scale
-            boolean magnificationIsSelected = superPolyVaryWindow != null && superPolyVaryWindow.getMagnificationIsSelected();
-
-            if (magnificationIsSelected) {
-                // Zhao Yu Li, Jul 08, 2025.
-                // Try to get the user enter scale factor
-                double scaleFactor = superPolyVaryWindow.getMagnification();
-
+            // abdul 27/07/2026 [consume only immutable Super settings after admission]
+            if (settings.magnify()) {
+                final double scaleFactor = settings.magnification();
                 // Zhao Yu Li, Jul 7, 2025.
                 // Scale after every rep
                 Interval oldXInterval = map.getViewRectangle().intervalX;
@@ -7301,20 +7925,38 @@ public final class Viewer {
             }
 
             overallProgress.increment(1);
-            final Tuple7<ConvexPolygon, Integer, Integer, Integer, Integer, Integer, Integer> curVals = Tuple.of(polyVals._1, polyVals._2, polyVals._3, polyVals._4,
-                    Math.max(0, polyVals._5 + SuperPolyVaryLoad.BoundCSstep * newVal),
-                    Math.max(0, polyVals._6 + SuperPolyVaryLoad.BoundOSOstep * newVal),
-                    Math.max(0, polyVals._7 + SuperPolyVaryLoad.BoundOSNOstep * newVal));
+            final int subdivisions = Math.max(
+                    0, request.subdivisions()
+                            + request.subdivisionStep() * newVal);
+            boyanMenu.autoCycleText.setText(Integer.toString(subdivisions));
+            final Tuple7<ConvexPolygon, Integer, Integer, Integer, Integer, Integer, Integer> curVals = Tuple.of(
+                    request.polygon(), settings.csMaximum(),
+                    settings.osoMaximum(), settings.osnoMaximum(),
+                    Math.max(0, settings.csSideSumMaximum()
+                            + settings.csStep() * newVal),
+                    Math.max(0, settings.osoSideSumMaximum()
+                            + settings.osoStep() * newVal),
+                    Math.max(0, settings.osnoSideSumMaximum()
+                            + settings.osnoStep() * newVal));
             final Optional<Color> curCol;
-            if(SuperPolyVaryLoad.ColorCycle) {
+            if(settings.colorCycle()) {
                 curCol = Optional.of(cycleColors.get(newVal % cycleColors.length()));
             } else {
                 curCol = Optional.empty();
             }
-            if(superAutoCb.isSelected()) {
-                autoPolyVaryFunction(curVals, Optional.of(step), curCol, true, SuperPolyVaryLoad.AutoCover, superPolyVaryWindow.getAutoSmallCover(), executor);
+            if(request.automatic()) {
+                // abdul 27/07/2026 [reuse SuperPolyVary's immutable search snapshot in Auto mode]
+                autoPolyVaryFunction(curVals, Optional.of(step), curCol, true, settings.autoCover(),
+                        settings.autoSmallCover(), request.searchRequest(), subdivisions,
+                        Tuple.of(request.startIndex(), request.lineStep(),
+                                request.endIndex()),
+                        request.automaticOptions(),
+                        operation, executor);
             } else {
-                polyVaryFunction(curVals, Optional.of(step), curCol, true, SuperPolyVaryLoad.AutoCover, superPolyVaryWindow.getAutoSmallCover(), executor);
+                // abdul 27/07/2026 [reuse the generation's immutable search snapshot across Super repetitions]
+                polyVaryFunction(curVals, Optional.of(step), curCol, true, settings.autoCover(),
+                        settings.autoSmallCover(), request.searchRequest(),
+                        subdivisions, operation, executor);
             }
         });
         overallProgress.show();
@@ -7324,13 +7966,20 @@ public final class Viewer {
     public void autoPolyVaryFunction(final Tuple7<ConvexPolygon, Integer, Integer, Integer, Integer, Integer, Integer> polyVals,
                                      final Optional<SimpleObjectProperty<Integer>> step, final Optional<Color> colorOpt,
                                      final boolean overrideSS, final boolean autoCover, final boolean autoSmallCover,
+                                     final VarySearchRequest searchRequest,
+                                     final int subdivisions,
+                                     final Tuple3<Integer, Integer, Integer> startStepEnd,
+                                     final AutoPolyVaryOptions autoOptions,
+                                     final OperationRegistry.OperationHandle operation,
                                      final ExecutorService executor
     ) {
 
-        // Zhao Yu Li, Jun 27, 2025.
-        // Replaced code block with function call.
-        Tuple3<Integer, Integer, Integer> startStepEnd = getStartStepEnd();
-        if (startStepEnd._1 == null) return;
+        if (startStepEnd._1 == null) {
+            // abdul 28/07/2026 [make an invalid AutoPolyVary range terminal instead of retaining an idle registered operation]
+            operation.cancel();
+            step.ifPresent(value -> value.setValue(-1));
+            return;
+        }
 
         autoVaryArea = Optional.of(polyVals._1);
         // Order is CSmax, OSOmax, OSNOmax, CSmaxSS, OSOmaxSS, OSNOmaxSS
@@ -7343,9 +7992,9 @@ public final class Viewer {
         // Run the AutoPolyVary algorithm parallel to the application so that the screen can be rendered in real time instead
         // of the application appearing to freeze (note that in the latter case, as far as the program is concerned, the screen
         // _is_ updating, but the user is unable to see this happen).
-        final int subdivisions = Integer.parseInt(boyanMenu.autoCycleText.getText());
-        final int maxMoves = Integer.parseInt(boyanMenu.maxMovesText.getText());
-        final int shots = Integer.parseInt(boyanMenu.shotsText.getText());
+        // abdul 27/07/2026 [report the same snapshotted values used by AutoPolyVary workers]
+        final int maxMoves = searchRequest.maximumMoves();
+        final int shots = searchRequest.shots();
         System.out.printf(
                 "+---------- AutoPolyVary running on %d hole(s): %d shots, %d subdivisions, and %d moves----------+%n",
                 endIdx - startIdx + 1,
@@ -7358,38 +8007,67 @@ public final class Viewer {
         }
         final ProgressMultiTask progress = new ProgressMultiTask("Line: %d, Stopping at: %d", true, startIdx+1, endIdx+1);
         progress.show();
-        final ExecutorService storageExecutor = new PriorityExecutor(Utils.numThreads);
-        final ExecutorService shotExecutor = new PriorityExecutor(Utils.numThreads);
+        // abdul 27/07/2026 [register both AutoPolyVary child pools with the application lifetime]
+        final ExecutorService storageExecutor = operation.own(
+                new PriorityExecutor(Utils.numThreads));
+        final ExecutorService shotExecutor = operation.own(
+                new PriorityExecutor(Utils.numThreads));
 
         if(autoCover) coverWindow.appendStablesInfo("// Start AutoPolyVary");
-        if(!AutoPolyVaryLoad.Reverse) {
-            drawAutoPolyVary(maxList, subdivisions, autoCover, autoSmallCover, overrideSS, startIdx, endIdx, stepIdx, area, progress, step, colorOpt, executor, storageExecutor, shotExecutor);
+        if(!autoOptions.reverse()) {
+            drawAutoPolyVary(maxList, subdivisions, autoCover, autoSmallCover, overrideSS, startIdx, endIdx, stepIdx,
+                    area, progress, step, colorOpt, searchRequest,
+                    autoOptions, operation,
+                    executor, storageExecutor, shotExecutor);
         } else {
-            drawAutoPolyVary(maxList, subdivisions, autoCover, autoSmallCover, overrideSS, endIdx, startIdx, -1 * stepIdx, area, progress, step, colorOpt, executor, storageExecutor, shotExecutor);
+            drawAutoPolyVary(maxList, subdivisions, autoCover, autoSmallCover, overrideSS, endIdx, startIdx, -1 * stepIdx,
+                    area, progress, step, colorOpt, searchRequest,
+                    autoOptions, operation,
+                    executor, storageExecutor, shotExecutor);
         }
     }
 
     private void polyVaryFunction(final Tuple7<ConvexPolygon, Integer, Integer, Integer, Integer, Integer, Integer> polyVals,
                                   final Optional<SimpleObjectProperty<Integer>> step, final Optional<Color> colorOpt, final boolean overrideSS,
-                                  final boolean autoCover, final ExecutorService executor) {
-        polyVaryFunction(polyVals, step, colorOpt, overrideSS, autoCover, false, executor);
+                                  final boolean autoCover, final VarySearchRequest searchRequest,
+                                  final int subdivisions,
+                                  final OperationRegistry.OperationHandle operation,
+                                  final ExecutorService executor) {
+        polyVaryFunction(polyVals, step, colorOpt, overrideSS, autoCover, false,
+                searchRequest, subdivisions, operation, executor);
     }
 
-    // Preforms the necessary preprocessing steps to run drawPolyVary 
+    // Preforms the necessary preprocessing steps to run drawPolyVary
     private void polyVaryFunction(final Tuple7<ConvexPolygon, Integer, Integer, Integer, Integer, Integer, Integer> polyVals,
                                   final Optional<SimpleObjectProperty<Integer>> step, final Optional<Color> colorOpt, final boolean overrideSS,
-                                  final boolean autoCover, final boolean autoSmallCover, final ExecutorService executor) {
+                                  final boolean autoCover, final boolean autoSmallCover,
+                                  final VarySearchRequest searchRequest,
+                                  final int subdivisions,
+                                  final OperationRegistry.OperationHandle operation,
+                                  final ExecutorService executor) {
         // Order is CSmax, OSOmax, OSNOmax, CSmaxSS, OSOmaxSS, OSNOmaxSS
         final int[] maxList = {polyVals._2, polyVals._3, polyVals._4, polyVals._5, polyVals._6, polyVals._7};
         final ConvexPolygon area = polyVals._1;
-        int subdivisions = Integer.parseInt(boyanMenu.autoCycleText.getText());
-        final int sum = Integer.parseInt(boyanMenu.maxMovesText.getText());
-        final int shots = Integer.parseInt(boyanMenu.shotsText.getText());
+        // abdul 27/07/2026 [keep direct PolyVary logging and sampling on its immutable request]
+        final int sum = searchRequest.maximumMoves();
+        final int shots = searchRequest.shots();
+        final CommittedRaster raster = committedRaster;
+        if (raster == null) {
+            operation.cancel();
+            throw new IllegalStateException(
+                    "PolyVary requires a committed render generation.");
+        }
+        final Rectangle committedView =
+                raster.camera.getViewRectangle();
 
-        final double xMin = Math.max(area.projectX().min, map.getViewRectangle().intervalX.min);
-        final double xMax = Math.min(area.projectX().max, map.getViewRectangle().intervalX.max);
-        final double yMin = Math.max(area.projectY().min, map.getViewRectangle().intervalY.min);
-        final double yMax = Math.min(area.projectY().max, map.getViewRectangle().intervalY.max);
+        final double xMin = Math.max(
+                area.projectX().min, committedView.intervalX.min);
+        final double xMax = Math.min(
+                area.projectX().max, committedView.intervalX.max);
+        final double yMin = Math.max(
+                area.projectY().min, committedView.intervalY.min);
+        final double yMax = Math.min(
+                area.projectY().max, committedView.intervalY.max);
 
         // shooting at points determined by subdivision
         //george may 3,2019 changed the name to polyvary instead of auto vary3
@@ -7409,35 +8087,49 @@ public final class Viewer {
         // 2024-05-23 complete redesign of PolyVary to support multi-threading
         final MutableList<Double> points = new FastList<>();
         final MutableList<Double> pointsFiltered = new FastList<>();
-        autoRecurse(xMin, xMax, yMin, yMax, 0, subdivisions, area, points); // Generate list of coords
-        final Image image = regionsImageView.getImage();
-        final PixelReader reader = image.getPixelReader();
+        autoRecurse(xMin, xMax, yMin, yMax, 0, subdivisions,
+                area, points, raster);
+        final PixelReader reader = raster.image.getPixelReader();
         // Filter out filled pixels
         for(int i = 0; i < points.size(); i += 2) {
-            final int midX = (int) map.pixelX(points.get(i));
-            final int midY = (int) map.pixelY(points.get(i+1));
-            int color = reader.getArgb(midX, midY);
-            if(color == 0) {
+            // abdul 27/07/2026 [fail closed when a direct PolyVary coordinate falls outside its committed raster]
+            if (CommittedRasterScanner.isTransparentAtPoint(
+                    SIDE, points.get(i), points.get(i + 1),
+                    raster.camera, reader::getArgb)) {
                 pointsFiltered.add(points.get(i));
                 pointsFiltered.add(points.get(i+1));
             }
         }
-        // Now that points have been found, pass to drawPolyVary for calculations 
-        final ExecutorService storageExecutor = new PriorityExecutor(Utils.numThreads);
-        final ExecutorService shotExecutor = new PriorityExecutor(Utils.numThreads);
-        drawPolyVary(pointsFiltered, maxList, area, step, colorOpt, overrideSS, autoCover, autoSmallCover, executor, storageExecutor, shotExecutor);
+        // Now that points have been found, pass to drawPolyVary for calculations
+        // abdul 27/07/2026 [register direct PolyVary child pools for every terminal path and app shutdown]
+        final ExecutorService storageExecutor = operation.own(
+                new PriorityExecutor(Utils.numThreads));
+        final ExecutorService shotExecutor = operation.own(
+                new PriorityExecutor(Utils.numThreads));
+        drawPolyVary(pointsFiltered, maxList, area, step, colorOpt, overrideSS, autoCover, autoSmallCover,
+                searchRequest, operation, executor, storageExecutor,
+                shotExecutor);
     }
 
-    // Calculates and draws codes at each of the list of points 
+    // Calculates and draws codes at each of the list of points
     private void drawPolyVary(final MutableList<Double> points, final int[] max, final ConvexPolygon area,
                               final Optional<SimpleObjectProperty<Integer>> step, final Optional<Color> colorOpt,
-                              final boolean overrideSS, final boolean autoCover, final boolean autoSmallCover, final ExecutorService executor,
+                              final boolean overrideSS, final boolean autoCover, final boolean autoSmallCover,
+                              final VarySearchRequest searchRequest,
+                              final OperationRegistry.OperationHandle operation,
+                              final ExecutorService executor,
                               final ExecutorService storageExecutor, final ExecutorService shotExecutor) {
+        // abdul 28/07/2026 [prevent a cancelled direct PolyVary generation from constructing or publishing another task]
+        if (!operation.permitsPublication()) {
+            return;
+        }
         // We want to filter the codes to avoid recalculating any codes that are already drawn on screen
         final MutableSortedSet<ClassifiedCodeSequence> onScreenCodes = new TreeSortedSet<>();
         onScreenSequences.keySet().forEach(storage -> {onScreenCodes.add(storage.classCodeSeq);});
         // Create the task
-        final PolyVaryTask task = new PolyVaryTask(points, onScreenCodes, boyanMenu, Array.ofAll(max), pool, overrideSS, storageExecutor, shotExecutor, regionsImageView, map, 0, 0);
+        // abdul 27/07/2026 [pass plain search values into PolyVaryTask instead of JavaFX controls]
+        final PolyVaryTask task = new PolyVaryTask(points, onScreenCodes, boyanMenu, searchRequest,
+                Array.ofAll(max), pool, overrideSS, storageExecutor, shotExecutor, regionsImageView, map, 0, 0);
         //final ObservableList<Storage> partials = task.getPartialProperty().get();
         final ProgressWithStatus progress = new ProgressWithStatus(task, "%d / %d", 0);
         // Count the number of holes we start with
@@ -7446,6 +8138,9 @@ public final class Viewer {
 
         // Update screen when change detected
         task.getPartialProperty().get().addListener((ListChangeListener.Change<? extends Storage> c) -> {
+            if (!operation.permitsPublication()) {
+                return;
+            }
             while (c.next()) {
                 if(!c.wasAdded()) continue;
                 // Draw all new additions
@@ -7481,6 +8176,10 @@ public final class Viewer {
         });
 
         task.setOnSucceeded(e -> {
+            if (!operation.permitsPublication()) {
+                progress.close();
+                return;
+            }
 
             final ObservableList<Storage> storages;
             try {
@@ -7537,9 +8236,17 @@ public final class Viewer {
             }
             // Increment for superPoly
             step.ifPresent(integerSimpleObjectProperty -> integerSimpleObjectProperty.setValue(integerSimpleObjectProperty.getValue() + 1));
+            if (step.isEmpty()) {
+                operation.complete();
+            }
         });
 
         task.setOnCancelled(e -> {
+            if (!operation.permitsPublication()) {
+                // abdul 28/07/2026 [retain direct PolyVary partials only for user cancellation, never shutdown cancellation]
+                progress.close();
+                return;
+            }
             task.getPartialProperty().get().forEach(storage -> {
                 if(!onScreenSequences.containsKey(storage)) {
                     final Color color;
@@ -7549,7 +8256,7 @@ public final class Viewer {
                 }
             });
 
-            // Wait for orderly cancellation of unfinished tasks 
+            // Wait for orderly cancellation of unfinished tasks
             Utils.shutdownExecutorAsync(storageExecutor);
             Utils.shutdownExecutorAsync(shotExecutor);
 
@@ -7587,16 +8294,29 @@ public final class Viewer {
             }
             // Propagate cancellation for Super
             step.ifPresent(integerSimpleObjectProperty -> integerSimpleObjectProperty.setValue(-1));
+            operation.cancel();
         });
 
         task.setOnFailed(e -> {
             progress.close();
+            final boolean reportFailure =
+                    operation.permitsPublication();
             // Propagate cancellation for Super
             step.ifPresent(integerSimpleObjectProperty -> integerSimpleObjectProperty.setValue(-1));
-            throw new RuntimeException(task.getException());
+            // abdul 27/07/2026 [failed direct PolyVary cancels and owns both child executors]
+            operation.cancel();
+            if (reportFailure) {
+                throw new RuntimeException(task.getException());
+            }
         });
 
-        executor.execute(task);
+        operation.track(task);
+        try {
+            executor.execute(task);
+        } catch (final RejectedExecutionException exception) {
+            operation.cancel();
+            throw exception;
+        }
         progress.show();
     }
 
@@ -7610,13 +8330,19 @@ public final class Viewer {
         private final ExecutorService drawExecutor;
         private final ExecutorService storageExecutor;
         private final ExecutorService shotExecutor;
+        private final VarySearchRequest searchRequest;
+        private final AutoPolyVaryOptions autoOptions;
+        private final OperationRegistry.OperationHandle operation;
         private final AtomicBoolean terminal = new AtomicBoolean(false);
 
         private AutoPolyVaryRun(final int[] max, final boolean autoCover, final boolean autoSmallCover,
                                final boolean overrideSS, final ProgressMultiTask progress,
                                final Optional<SimpleObjectProperty<Integer>> step,
                                final ExecutorService drawExecutor, final ExecutorService storageExecutor,
-                               final ExecutorService shotExecutor) {
+                               final ExecutorService shotExecutor,
+                               final VarySearchRequest searchRequest,
+                               final AutoPolyVaryOptions autoOptions,
+                               final OperationRegistry.OperationHandle operation) {
             this.max = max;
             this.autoCover = autoCover;
             this.autoSmallCover = autoSmallCover;
@@ -7626,6 +8352,10 @@ public final class Viewer {
             this.drawExecutor = drawExecutor;
             this.storageExecutor = storageExecutor;
             this.shotExecutor = shotExecutor;
+            // abdul 27/07/2026 [bind every recursive AutoPolyVary coordinate to one plain-value search generation]
+            this.searchRequest = searchRequest;
+            this.autoOptions = autoOptions;
+            this.operation = operation;
         }
 
         private boolean isTerminal() {
@@ -7637,6 +8367,14 @@ public final class Viewer {
             // first terminal callback may render, close executors, or advance
             // SuperPolyVary, otherwise one run prints repeated ending banners.
             if (!terminal.compareAndSet(false, true)) {
+                return;
+            }
+
+            if (!operation.permitsPublication()) {
+                // abdul 28/07/2026 [retire AutoPolyVary resources without rendering or advancing Super after application shutdown]
+                Utils.shutdownExecutorAsync(storageExecutor);
+                Utils.shutdownExecutorAsync(shotExecutor);
+                progress.close();
                 return;
             }
 
@@ -7652,6 +8390,7 @@ public final class Viewer {
                 if (autoCover) coverWindow.show();
                 if (autoSmallCover) smallCoverWindow.show();
                 step.ifPresent(value -> value.setValue(-1));
+                operation.cancel();
             } else {
                 if (autoCover) {
                     coverWindow.show();
@@ -7665,6 +8404,9 @@ public final class Viewer {
                     System.out.println("+------------------------ AutoPolyVary finished successfully ------------------------+");
                 }
                 step.ifPresent(value -> value.setValue(value.getValue() + 1));
+                if (step.isEmpty()) {
+                    operation.complete();
+                }
             }
             progress.close();
         }
@@ -7673,19 +8415,29 @@ public final class Viewer {
             if (!terminal.compareAndSet(false, true)) {
                 return;
             }
+            final boolean propagateFailure =
+                    operation.permitsPublication();
             Utils.shutdownExecutorAsync(storageExecutor);
             Utils.shutdownExecutorAsync(shotExecutor);
             progress.close();
-            step.ifPresent(value -> value.setValue(-1));
+            if (propagateFailure) {
+                step.ifPresent(value -> value.setValue(-1));
+            }
+            // abdul 27/07/2026 [failed AutoPolyVary cancels every registered task and child pool]
+            operation.cancel();
         }
     }
 
     private int drawAutoPolyVary(final int[] max, final int maxSubdivisions, final boolean autoCover, final boolean autoSmallCover, final boolean overrideSS,
                                  final int currIdx, final int endIdx, final int stepIdx, final ConvexPolygon area, final ProgressMultiTask overallProgress,
                                  final Optional<SimpleObjectProperty<Integer>> step, final Optional<Color> colorOpt,
+                                 final VarySearchRequest searchRequest,
+                                 final AutoPolyVaryOptions autoOptions,
+                                 final OperationRegistry.OperationHandle operation,
                                  final ExecutorService drawExecutor, final ExecutorService storageExecutor, final ExecutorService shotExecutor) {
         final AutoPolyVaryRun run = new AutoPolyVaryRun(max, autoCover, autoSmallCover, overrideSS, overallProgress,
-                step, drawExecutor, storageExecutor, shotExecutor);
+                step, drawExecutor, storageExecutor, shotExecutor,
+                searchRequest, autoOptions, operation);
         return drawAutoPolyVary(maxSubdivisions, currIdx, endIdx, stepIdx, area, colorOpt, run, new ArrayList<>());
     }
 
@@ -7728,7 +8480,10 @@ public final class Viewer {
                                                final int stepIdx, final ConvexPolygon area,
                                                final Optional<Color> colorOpt, final AutoPolyVaryRun run,
                                                final ArrayList<Storage> previousCodes) {
-        if (run.isTerminal()) {
+        if (run.isTerminal()
+                || !run.operation.permitsPublication()) {
+            // abdul 28/07/2026 [do not start another recursive AutoPolyVary coordinate for a terminal application generation]
+            run.fail();
             return -1;
         }
         if (run.progress.isCancelled()) {
@@ -7750,23 +8505,34 @@ public final class Viewer {
                 return 0;
             }
         }
+        final CommittedRaster raster = committedRaster;
+        if (raster == null) {
+            run.fail();
+            return -1;
+        }
+        final Rectangle committedView =
+                raster.camera.getViewRectangle();
 
-        final double xMin = Math.max(area.projectX().min, map.getViewRectangle().intervalX.min);
-        final double xMax = Math.min(area.projectX().max, map.getViewRectangle().intervalX.max);
-        final double yMin = Math.max(area.projectY().min, map.getViewRectangle().intervalY.min);
-        final double yMax = Math.min(area.projectY().max, map.getViewRectangle().intervalY.max);
+        final double xMin = Math.max(
+                area.projectX().min, committedView.intervalX.min);
+        final double xMax = Math.min(
+                area.projectX().max, committedView.intervalX.max);
+        final double yMin = Math.max(
+                area.projectY().min, committedView.intervalY.min);
+        final double yMax = Math.min(
+                area.projectY().max, committedView.intervalY.max);
 
         final MutableList<Double> points = new FastList<>();
         final MutableList<Double> pointsFiltered = new FastList<>();
-        autoRecurse(xMin, xMax, yMin, yMax, 0, maxSubdivisions, area, points);
-        final Image image = regionsImageView.getImage();
-        final PixelReader reader = image.getPixelReader();
+        autoRecurse(xMin, xMax, yMin, yMax, 0,
+                maxSubdivisions, area, points, raster);
+        final PixelReader reader = raster.image.getPixelReader();
         // Filter out filled pixels
         for(int i = 0; i < points.size(); i += 2) {
-            final int midX = (int) map.pixelX(points.get(i));
-            final int midY = (int) map.pixelY(points.get(i+1));
-            int color = reader.getArgb(midX, midY);
-            if(color == 0) {
+            // abdul 27/07/2026 [fail closed when an AutoPolyVary coordinate falls outside its committed raster]
+            if (CommittedRasterScanner.isTransparentAtPoint(
+                    SIDE, points.get(i), points.get(i + 1),
+                    raster.camera, reader::getArgb)) {
                 pointsFiltered.add(points.get(i));
                 pointsFiltered.add(points.get(i+1));
             }
@@ -7782,31 +8548,36 @@ public final class Viewer {
         final MutableSortedSet<ClassifiedCodeSequence> onScreenCodes = new TreeSortedSet<>();
         onScreenSequences.keySet().forEach(storage -> {onScreenCodes.add(storage.classCodeSeq);});
 
-        if (autoPolyVaryWindow == null) autoPolyVaryWindow = new AutoPolyVaryLoad("AutoPolyVary", "AutoVary", tmpDir + "cover_polygon.txt", tmpDir + "PolyAutoVaryBounds.txt");
-        int mode = autoPolyVaryWindow.getMode();
-        Integer numGroupToPrint = autoPolyVaryWindow.getNumGroupToPrint();
-
-        if (numGroupToPrint == null) {
-            run.finish(true);
-            return -1;
-        }
+        // abdul 27/07/2026 [recursive coordinates consume only the admitted AutoPolyVary options]
+        final int mode = run.autoOptions.printMode();
+        final int numGroupToPrint =
+                run.autoOptions.groupsToPrint();
 
         // Create the only PolyVaryTask owned by this run at this coordinate.
-        final PolyVaryTask task = new PolyVaryTask(pointsFiltered, onScreenCodes, boyanMenu, Array.ofAll(run.max), pool,
+        final PolyVaryTask task = new PolyVaryTask(pointsFiltered, onScreenCodes, boyanMenu, run.searchRequest, Array.ofAll(run.max), pool,
                 run.overrideSS, run.storageExecutor, run.shotExecutor, regionsImageView, map, mode, numGroupToPrint);
         final ObservableList<Storage> partials = task.getPartials();
         run.progress.changeTask(task);
 
         // Zhao Yu Li, Jun 25, 2025.
         // Determines whether to add vary results to the IterateToLimitWindow Cover
-        final boolean addToAllPositive = autoPolyVaryWindow.allPositiveIsSelected();  // Add code with all-positive iteration patterns
-        final boolean addToPlusMinus = autoPolyVaryWindow.plusMinusIsSelected();  // Add code with plus/minus patterns
-
-        if ((addToAllPositive || addToPlusMinus) && iterateToLimitWindow == null) iterateToLimitWindow = new IterateToLimitWindow(pool);
+        final boolean addToAllPositive =
+                run.autoOptions.addToAllPositive();
+        final boolean addToPlusMinus =
+                run.autoOptions.addToPlusMinus();
+        if ((addToAllPositive || addToPlusMinus)
+                && iterateToLimitWindow == null) {
+            // abdul 27/07/2026 [retain operation ownership when PolyVary creates Iterate as a result sink]
+            iterateToLimitWindow =
+                    new IterateToLimitWindow(pool, operations);
+        }
 
         // Update screen when change detected
         partials.addListener((ListChangeListener.Change<? extends Storage> c) -> {
-            if(run.progress.isCancelled() || run.isTerminal()) return;
+            if (run.progress.isCancelled() || run.isTerminal()
+                    || !run.operation.permitsPublication()) {
+                return;
+            }
             while (c.next()) {
                 if(!c.wasAdded()) continue;
                 c.getAddedSubList().forEach(storage -> processAutoPolyVaryStorage(storage, colorOpt, mode,
@@ -7815,7 +8586,11 @@ public final class Viewer {
         });
 
         task.setOnSucceeded(e -> {
-            if (run.isTerminal()) return;
+            if (run.isTerminal()
+                    || !run.operation.permitsPublication()) {
+                run.fail();
+                return;
+            }
 
             final ObservableList<Storage> storages;
             try {
@@ -7832,15 +8607,25 @@ public final class Viewer {
         });
 
         task.setOnCancelled(e -> {
+            if (!run.operation.permitsPublication()) {
+                // abdul 28/07/2026 [skip AutoPolyVary cancel publication when the registry initiated shutdown]
+                run.fail();
+                return;
+            }
             partials.forEach(storage -> processAutoPolyVaryStorage(storage, colorOpt, mode,
                     addToAllPositive, addToPlusMinus, true, run));
             run.finish(true);
         });
 
         task.setOnFailed(e -> {
+            final boolean reportFailure =
+                    run.operation.permitsPublication();
             run.fail();
-            throw new RuntimeException(task.getException());
+            if (reportFailure) {
+                throw new RuntimeException(task.getException());
+            }
         });
+        run.operation.track(task);
         try {
             run.drawExecutor.execute(task);
         } catch (final RejectedExecutionException e) {
@@ -7867,7 +8652,9 @@ public final class Viewer {
     private void processAutoPolyVaryStorage(final Storage storage, final Optional<Color> colorOpt, final int mode,
                                             final boolean addToAllPositive, final boolean addToPlusMinus,
                                             final boolean forcePrint, final AutoPolyVaryRun run) {
-        if (run.isTerminal() || onScreenSequences.containsKey(storage)) {
+        if (run.isTerminal()
+                || !run.operation.permitsPublication()
+                || onScreenSequences.containsKey(storage)) {
             return;
         }
 
@@ -7898,14 +8685,33 @@ public final class Viewer {
 
 
     // Calculate 4^max vary locations which are distributed across the entire query area
+    // abdul 28/07/2026 [hold one committed raster through the complete recursive hole scan so camera generations cannot mix]
     public void autoRecurse(final double xMin, final double xMax, final double yMin, final double yMax,
                              final int depth, final int max, final ConvexPolygon area, final MutableList<Double> points) {
+        final CommittedRaster raster = committedRaster;
+        if (raster != null) {
+            autoRecurse(
+                    xMin, xMax, yMin, yMax, depth, max, area,
+                    points, raster);
+        }
+    }
 
+    private void autoRecurse(
+            final double xMin, final double xMax,
+            final double yMin, final double yMax,
+            final int depth, final int max,
+            final ConvexPolygon area,
+            final MutableList<Double> points,
+            final CommittedRaster raster) {
         if (depth > max) {
             return;
         }
-        if (!findHole((int) map.pixelX(xMin), (int) map.pixelX(xMax), (int) map.pixelY(yMin),
-                (int) map.pixelY(yMax), area)
+        if (!findHole(
+                (int) raster.camera.pixelX(xMin),
+                (int) raster.camera.pixelX(xMax),
+                (int) raster.camera.pixelY(yMin),
+                (int) raster.camera.pixelY(yMax), area,
+                new FastList<>(), raster)
                 .isPresent()) {
             return;
         }
@@ -7922,10 +8728,10 @@ public final class Viewer {
             points.add(ry);
         }
 
-        autoRecurse(xMin, rx, yMin, ry, depth + 1, max, area, points);
-        autoRecurse(rx, xMax, yMin, ry, depth + 1, max, area, points);
-        autoRecurse(xMin, rx, ry, yMax, depth + 1, max, area, points);
-        autoRecurse(rx, xMax, ry, yMax, depth + 1, max, area, points);
+        autoRecurse(xMin, rx, yMin, ry, depth + 1, max, area, points, raster);
+        autoRecurse(rx, xMax, yMin, ry, depth + 1, max, area, points, raster);
+        autoRecurse(xMin, rx, ry, yMax, depth + 1, max, area, points, raster);
+        autoRecurse(rx, xMax, ry, yMax, depth + 1, max, area, points, raster);
     }
 
     private String drawRegion(ArrayList<Optional<Storage>> storages,
@@ -8382,31 +9188,35 @@ public final class Viewer {
     // the three vary tasks in a for loop, but that may enter a race condition, as we can't calculate the intersection
     // until all Vary tasks finish. The recursion method makes sure that the next one starts only after the previous
     // one successfully executes to completion.
-    public void queuedVaryTask(final List<Tuple2<Double, Double>> originalPoints,
-                               final List<Tuple2<Double, Double>> points,
-                               final int index,
-                               final int max,
-                               ExecutorService executor,
-                               final int step,
-                               final int numToPrint,
-                               final boolean draw,
-                               final boolean addToCover)
+    private void queuedVaryTask(
+            final TetraBarRequest request,
+            final int index,
+            final ExecutorService outerExecutor,
+            final ExecutorService shotExecutor,
+            final ArrayList<MutableSortedSet<ClassifiedCodeSequence>> groupCodes,
+            final OperationRegistry.OperationHandle operation)
     {
+        // abdul 28/07/2026 [prevent queued TetraBar recursion and result publication after registry cancellation]
+        if (!operation.permitsPublication()) {
+            return;
+        }
         int next = index + 1;
 
         String mode = "";
-        if (step == 2) mode = "Bar";
-        if (step == 3) mode = "Tetrahedron";
+        if (request.groupSize() == 2) mode = "Bar";
+        if (request.groupSize() == 3) mode = "Tetrahedron";
 
-        if (next > max) {
-            executor.shutdown();
+        if (next > request.samplePoints().size()) {
             System.out.println("// Finished " + mode + ".");
+            operation.complete();
             return;
         }
 
         if (index == 0) {
             System.out.println("// Start " + mode + ".");
-            if (addToCover) coverWindow.appendStablesInfo("// Start " + mode + ".");
+            if (request.addToCover()) {
+                coverWindow.appendStablesInfo("// Start " + mode + ".");
+            }
         }
 
         final Task<MutableSortedSet<ClassifiedCodeSequence>> varyTask
@@ -8414,28 +9224,31 @@ public final class Viewer {
 
             @Override
             protected MutableSortedSet<ClassifiedCodeSequence> call() {
-                return boyanMenu.varyTriangles(points.get(index)._1, points.get(index)._2,
-                        Double.parseDouble(boyanMenu.varyX2Text.getText()),
-                        Double.parseDouble(boyanMenu.varyY2Text.getText()),
-                        Double.parseDouble(boyanMenu.varyX3Text.getText()),
-                        Double.parseDouble(boyanMenu.varyY3Text.getText()),
-                        Double.parseDouble(boyanMenu.line1CutText.getText()),
-                        Double.parseDouble(boyanMenu.line2CutText.getText()),
-                        3, executor);
+                // abdul 27/07/2026 [workers consume only the TetraBar request's plain values]
+                final Tuple2<Double, Double> point =
+                        request.samplePoints().get(index);
+                return boyanMenu.varyTriangles(
+                        point._1, point._2, request.x2(), request.y2(),
+                        request.x3(), request.y3(), request.line1Cut(),
+                        request.line2Cut(), 3, request.searchRequest(),
+                        shotExecutor);
             }
         };
 
         //final Progress progress = new Progress(varyTask);
         final ProgressWithStatus progress = new ProgressWithStatus(varyTask, "Calling findCodes3 (no status)", 0);
-        final Thread varyThread = new Thread(varyTask);
-
         String finalMode = mode;
         varyTask.setOnSucceeded(success -> {
+            if (!operation.permitsPublication()) {
+                progress.close();
+                return;
+            }
             try {
                 MutableSortedSet<ClassifiedCodeSequence> allCodes = varyTask.get();
                 allCodes.forEach(seq -> Database.saveToDatabase(seq, "garbage"));
-                tetrahedronCodes.add(allCodes);
+                groupCodes.add(allCodes);
             } catch (InterruptedException | ExecutionException e) {
+                operation.cancel();
                 throw new RuntimeException(e);
             }
 
@@ -8445,17 +9258,21 @@ public final class Viewer {
             // Updated to handle tetrahedron points from a list of coordinates instead of just a single one.
             // For each tetrahedron, we need to perform Vary3 on three of its points. Therefore, every three points we
             // process, we need to compute the intersections of the results from the Vary tasks.
-            if (next % step == 0) {
-                assert step == tetrahedronCodes.size();
+            if (next % request.groupSize() == 0) {
+                if (request.groupSize() != groupCodes.size()) {
+                    operation.cancel();
+                    throw new IllegalStateException(
+                            "TetraBar completed an incomplete result group.");
+                }
 
-                System.out.println("// " + finalMode +  " results for (" + originalPoints.get(index / step)._1 + ", " + originalPoints.get(index / step)._2 + ")");
+                System.out.println("// " + finalMode +  " results for (" + request.originalPoints().get(index / request.groupSize())._1 + ", " + request.originalPoints().get(index / request.groupSize())._2 + ")");
 
                 ArrayList<Collection<ClassifiedCodeSequence>> cList = new ArrayList<>();
 
-                cList.add(tetrahedronCodes.get(0));
+                cList.add(groupCodes.get(0));
 
-                for (int i = 1; i < step; i++) {
-                    cList.add(tetrahedronCodes.get(i));
+                for (int i = 1; i < request.groupSize(); i++) {
+                    cList.add(groupCodes.get(i));
                     ArrayList<ClassifiedCodeSequence> matching = Utils.getIntersectionCodes(cList);
 
                     cList.clear();
@@ -8467,7 +9284,7 @@ public final class Viewer {
                 } else {
                     System.out.println("// Found " + cList.get(0).size() + " matching codes.");
 
-                    final int finalNumToPrint = numToPrint == 0 ? cList.get(0).size() : numToPrint;
+                    final int finalNumToPrint = request.maximumPrinting() == 0 ? cList.get(0).size() : request.maximumPrinting();
 
                     // Zhao Yu Li, Jun 3, 2025.
                     // Lifted the print mid and load storage functionalities into their own utility files.
@@ -8475,7 +9292,7 @@ public final class Viewer {
 
                     // Zhao Yu Li, Jun 3, 2025.
                     // Add codes to cover.
-                    if (addToCover) {
+                    if (request.addToCover()) {
                         for (ClassifiedCodeSequence code : codesPrinted) {
                             if (ClassifiedCodeSequence.isStableCodeType(code.codeType)) {
                                 coverWindow.appendStablesInfo(getCoverCodeString(code));
@@ -8483,7 +9300,7 @@ public final class Viewer {
                         }
                     }
 
-                    if (draw) {
+                    if (request.draw()) {
                         final int colorIndex = cycle.get();
                         Color color = comboBoxColors.get(colorIndex);
 
@@ -8495,29 +9312,36 @@ public final class Viewer {
                     }
                 }
 
-                tetrahedronCodes.clear();
+                groupCodes.clear();
 
-                if (draw) {
-                    renderRegions(onScreenSequences, guideLinesImageView, regionsImageView, executor);
+                if (request.draw()) {
+                    renderRegions(onScreenSequences, guideLinesImageView,
+                            regionsImageView, executorService);
                 }
             }
 
-            queuedVaryTask(originalPoints, points, next, max, executor, step, numToPrint, draw, addToCover);
+            queuedVaryTask(request, next, outerExecutor, shotExecutor,
+                    groupCodes, operation);
         });
 
         varyTask.setOnCancelled(cancelled -> {
             System.out.println("// " + finalMode + " Cancelled");
-            varyThread.interrupt();
-            executor.shutdownNow();
             progress.close();
+            operation.cancel();
         });
         varyTask.setOnFailed(fail -> {
             System.out.println("// " + finalMode + " failed: " + fail);
-            executor.shutdown();
             progress.close();
+            operation.cancel();
         });
 
-        varyThread.start();
+        operation.track(varyTask);
+        try {
+            outerExecutor.execute(varyTask);
+        } catch (final RejectedExecutionException exception) {
+            operation.cancel();
+            throw exception;
+        }
 
         progress.show();
     }
@@ -8626,6 +9450,13 @@ public final class Viewer {
     }
 
     public void moveScreen(String xString, String yString) {
+        moveScreen(xString, yString, executorService);
+    }
+
+    void moveScreen(
+            final String xString,
+            final String yString,
+            final ExecutorService renderExecutor) {
         double x;
         try {
             x = Double.parseDouble(xString);
@@ -8640,12 +9471,43 @@ public final class Viewer {
             throw new NumberFormatException();
         }
 
-        moveScreen(x, y);
+        // abdul 27/07/2026 [allow sequential workflows to choose a caller-owned executor and wait for a matching camera commit]
+        moveScreen(x, y, renderExecutor);
     }
 
     public void moveScreen(double x, double y) {
+        moveScreen(x, y, executorService);
+    }
+
+    private void moveScreen(
+            final double x,
+            final double y,
+            final ExecutorService renderExecutor) {
         final double xRad = Math.toRadians(x);
         final double yRad = Math.toRadians(y);
-        zoom(xRad, xRad, yRad, yRad, executorService);
+        zoom(xRad, xRad, yRad, yRad, renderExecutor);
+    }
+
+    Optional<Rectangle> committedViewRectangle() {
+        final CommittedRaster raster = committedRaster;
+        // abdul 27/07/2026 [do not advertise an old committed view while a newer camera generation is pending]
+        return raster == null
+                || raster.generation != renderGeneration.get()
+                ? Optional.empty()
+                : Optional.of(raster.camera.getViewRectangle());
+    }
+
+    boolean isCommittedRasterTransparent(
+            final double rx,
+            final double ry) {
+        final CommittedRaster raster = committedRaster;
+        if (raster == null
+                || raster.generation != renderGeneration.get()) {
+            return false;
+        }
+        // abdul 27/07/2026 [offer CycleVary a checked query without exposing or re-pairing the committed raster internals]
+        final PixelReader reader = raster.image.getPixelReader();
+        return CommittedRasterScanner.isTransparentAtPoint(
+                SIDE, rx, ry, raster.camera, reader::getArgb);
     }
 }

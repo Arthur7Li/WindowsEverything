@@ -112,7 +112,19 @@ function Invoke-CtagsInventory {
         }
     }
 
-    return @($symbols | Sort-Object id, line -Unique)
+    $ordered = @($symbols | Sort-Object id, line -Unique)
+    # abdul 28/07/2026 [give explicit specializations and generated symbols distinct stable ledger IDs when Ctags reports the same apparent signature]
+    foreach ($group in ($ordered | Group-Object id)) {
+        if ($group.Count -eq 1) {
+            continue
+        }
+        $ordinal = 1
+        foreach ($symbol in ($group.Group | Sort-Object line)) {
+            $symbol.id = '{0}@{1}' -f $group.Name, $ordinal
+            $ordinal++
+        }
+    }
+    return $ordered
 }
 
 function Remove-ReaderGeneratedReference {
@@ -227,6 +239,11 @@ $symbols = @(Invoke-CtagsInventory)
 if ($symbols.Count -eq 0) {
     throw 'Ctags produced no documentable symbols.'
 }
+$duplicateInventoryIds = @(
+    $symbols | Group-Object id | Where-Object Count -gt 1)
+if ($duplicateInventoryIds.Count -ne 0) {
+    throw "Ctags inventory contains $($duplicateInventoryIds.Count) duplicate IDs."
+}
 
 $symbols | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 -LiteralPath (Join-Path $outputRoot 'symbols.json')
 $symbols | Export-Csv -NoTypeInformation -Encoding utf8 -LiteralPath (Join-Path $outputRoot 'symbols.csv')
@@ -246,6 +263,11 @@ if (-not $SkipDoxygen) {
 }
 
 $ledger = @(Import-Csv -LiteralPath $ledgerPath)
+$duplicateLedgerIds = @(
+    $ledger | Group-Object id | Where-Object Count -gt 1)
+if ($duplicateLedgerIds.Count -ne 0) {
+    throw "Coverage ledger contains $($duplicateLedgerIds.Count) duplicate IDs."
+}
 $inventoryById = @{}
 foreach ($symbol in $symbols) { $inventoryById[$symbol.id] = $symbol }
 $ledgerById = @{}

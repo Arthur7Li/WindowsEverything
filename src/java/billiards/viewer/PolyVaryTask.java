@@ -56,6 +56,8 @@ public final class PolyVaryTask extends Task<ObservableList<Storage>> implements
     private final Array<Vector2> coordList;
     private final MutableSortedSet<ClassifiedCodeSequence> onScreenCodes;
     private final BoyanMenu boyanMenu;
+    // abdul 28/07/2026 [store one immutable control snapshot for the complete PolyVary task lifetime]
+    private final VarySearchRequest searchRequest;
     private final ConnectionPool pool;
     private final int CSmax;
     private final int OSOmax;
@@ -74,7 +76,6 @@ public final class PolyVaryTask extends Task<ObservableList<Storage>> implements
     private volatile double imgWidth;
     private volatile double imgHeight;
     private volatile boolean gracefulCancelRequested = false;
-
     @Override
     public void requestGracefulCancel() {
         this.gracefulCancelRequested = true;
@@ -82,13 +83,15 @@ public final class PolyVaryTask extends Task<ObservableList<Storage>> implements
 
     // Constructor takes a list of points to vary at
     public PolyVaryTask(
-        final MutableList<Double> points, final MutableSortedSet<ClassifiedCodeSequence> onScreenCodes, final BoyanMenu boyan, 
+        final MutableList<Double> points, final MutableSortedSet<ClassifiedCodeSequence> onScreenCodes, final BoyanMenu boyan,
+        final VarySearchRequest searchRequest,
         final Array<Integer> max, final ConnectionPool pool, final boolean override, final ExecutorService eOne,
         final ExecutorService eTwo, final ImageView screen, final PixelRadianMap map, final int mode,
         final int numGroupToPrint) {
         this.coordList = toCoords(points);
         this.onScreenCodes = onScreenCodes;
         this.boyanMenu = boyan;
+        this.searchRequest = searchRequest;
         this.CSmax = max.get(0);
         this.OSOmax = max.get(1);
         this.OSNOmax = max.get(2);
@@ -282,7 +285,13 @@ public final class PolyVaryTask extends Task<ObservableList<Storage>> implements
         // autoVary requires coordinates to be in degree format
         final Vector2 degCoords = Vector2.create(Math.toDegrees(coords.x), Math.toDegrees(coords.y));
         final MutableSortedSet<ClassifiedCodeSequence> codes = new TreeSortedSet<>();
-        final MutableSortedSet<ClassifiedCodeSequence> boyanCodes = overrideSS ? boyanMenu.autoVary(degCoords, this.CSmaxSS, this.OSOmaxSS, this.OSNOmaxSS, executor) : boyanMenu.autoVary(degCoords, executor);
+        // abdul 27/07/2026 [keep PolyVary independent from control edits after its generation starts]
+        final MutableSortedSet<ClassifiedCodeSequence> boyanCodes = overrideSS
+                ? boyanMenu.autoVary(
+                        degCoords, this.CSmaxSS, this.OSOmaxSS, this.OSNOmaxSS,
+                        searchRequest, executor)
+                : boyanMenu.autoVary(
+                        degCoords, searchRequest, executor);
         // Generate the filtered list
         for (ClassifiedCodeSequence code : boyanCodes) {
             if (code.codeType.equals(CodeType.CS)) {
@@ -297,7 +306,11 @@ public final class PolyVaryTask extends Task<ObservableList<Storage>> implements
     }
 
     private boolean shouldStopAfterVaryFailure(final RuntimeException e) {
-        if (this.gracefulCancelRequested || this.isCancelled() || Thread.currentThread().isInterrupted()) {
+        // abdul 31/07/2026 [treat a latched native-admission cancellation as normal task termination]
+        if (e instanceof CancellationException
+                || this.gracefulCancelRequested
+                || this.isCancelled()
+                || Thread.currentThread().isInterrupted()) {
             return true;
         }
 
@@ -382,22 +395,27 @@ public final class PolyVaryTask extends Task<ObservableList<Storage>> implements
             System.out.println("//Cancel detected before loadStorage");
             return Either.left("");
         }
-        // Load from database if code already exists. If not, calculate
-        final Optional<Storage> opt = Database.loadStorage(classCodeSeq, this.pool);
+        // abdul 31/07/2026 [load every valid Vary candidate and let unexpected native failures terminate the task visibly]
+        final Optional<Storage> loaded = Database.loadStorage(classCodeSeq, this.pool);
         // Check to see if cancel was called
         if(this.isCancelled() || Thread.interrupted()) {
             Thread.currentThread().interrupt();
             System.out.println("//Cancel detected after loadStorage");
             return Either.left("");
         }
-        if (opt.isPresent()) {
-            final Storage storage = opt.get();
-            // Update partialResults on the application thread in order to enforce thread safety
-            Platform.runLater(() -> this.partialResults.get().add(storage));
+        if (loaded.isPresent()) {
+            final Storage storage = loaded.get();
+            // abdul 28/07/2026 [suppress queued partial publication after hard operation/application cancellation]
+            if (!this.isCancelled()) {
+                Platform.runLater(() -> {
+                    if (!this.isCancelled()) {
+                        this.partialResults.get().add(storage);
+                    }
+                });
+            }
             return Either.right(storage);
-        } else {
-            return Either.left("//empty set " + classCodeSeq);
         }
+        return Either.left("//empty set " + classCodeSeq);
     }
 
     // These expose partialResults to the FX application thread

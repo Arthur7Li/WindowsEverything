@@ -16,13 +16,29 @@ const float64_t OFFSET = 0.05;
    */
 
 
+/**
+ * @brief Traverses the four-angle Vary search tree and appends every requested code found in range.
+ * @param min Minimum move depth accepted by the traversal.
+ * @param max Maximum move depth explored by the traversal.
+ * @param specMin Lower root search parameter.
+ * @param specMax Upper root search parameter.
+ * @param sideSum Mutable traversal accumulator owned by the caller for this invocation.
+ * @param billiard Initial four-angle billiard copied into the root frame.
+ * @param code Mutable depth-first code buffer borrowed for the duration of the call.
+ * @param codesFound Caller-owned output collection receiving complete codes.
+ * @param reqType Requested code-type encoding copied into this call.
+ * @return Nothing; results are appended to @p codesFound.
+ * @throws std::runtime_error When traversal, unfolding, or classification invariants fail.
+ * @invariant Cancellation belongs to the complete UI operation rather than an individual queued native invocation.
+ * @note The function does not retain references after returning.
+ */
+// abdul 31/07/2026 [stop Vary4 from clearing the cancellation latch before its traversal begins]
 void iterateFireAway4(
     int32_t min, int32_t max, float64_t specMin, float64_t specMax, 
     SideSum& sideSum, TriangleBilliard4 billiard,
     std::vector<int32_t>& code,
     std::vector<std::vector<int32_t>>& codesFound, std::string reqType)
 {
-    cancel_flag().store(false,  std::memory_order_relaxed); 
     // store data in each level
     struct Frame {
         int32_t swapValue;
@@ -46,7 +62,8 @@ void iterateFireAway4(
 		
 
 			while (!stack.empty()) {
-                if (cancel_flag().load(std::memory_order_relaxed)) {
+                // Observe the operation-level release store before scheduling another Vary4 branch.
+                if (cancel_flag().load(std::memory_order_acquire)) {
                     std::cout << "C++ Vary4 Cancel" << std::endl;
                     return ;}
                 
@@ -70,7 +87,8 @@ void iterateFireAway4(
 							 
                             float64_t perfectAngle = std::atan2(frame.cbilliard.vertexA.y,frame.cbilliard.vertexA.x);
 
-                            if (billiard.between(perfectAngle)) {
+                            // abdul 27/07/2026 [test the current descendant beam because the worker-root bounds are stale after unfolding]
+                            if (frame.cbilliard.between(perfectAngle)) {
 
                                 auto seq = convert(code);
                                 if (seq){

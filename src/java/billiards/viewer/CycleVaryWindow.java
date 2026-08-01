@@ -9,17 +9,17 @@ import javafx.beans.property.SimpleObjectProperty;
 import javafx.collections.ListChangeListener;
 import javafx.collections.ObservableList;
 import javafx.scene.control.*;
-import javafx.scene.image.Image;
-import javafx.scene.image.PixelReader;
 import javafx.scene.image.WritableImage;
 import javafx.scene.text.Text;
 
 import java.io.File;
 import java.util.ArrayList;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 
 import billiards.geometry.ConvexPolygon;
 import javafx.geometry.Insets;
@@ -118,11 +118,15 @@ public class CycleVaryWindow {
     private final TextField changeMagnificationText = new TextField();
 
     private final Viewer viewer;
+    private final OperationRegistry operations;
+    private OperationRegistry.OperationHandle activeOperation;
 
     private final String coordsFileName;
 
-    public CycleVaryWindow(final String windowTitle, final String buttonText, final String fileName, final String boundsFileName, final String stepFileName, final String coordsFileName, final Viewer viewer) {
+    public CycleVaryWindow(final String windowTitle, final String buttonText, final String fileName, final String boundsFileName, final String stepFileName, final String coordsFileName, final Viewer viewer, final OperationRegistry operations) {
         this.viewer = viewer;
+        // abdul 27/07/2026 [bind every CycleVary task and executor to the application lifetime]
+        this.operations = Objects.requireNonNull(operations, "operations");
         this.coordsFileName = coordsFileName;
         polygonString = Utils.readFromFile(fileName);
         String[] boundTokens = Utils.readFromFile(boundsFileName).trim().split(" ");
@@ -165,6 +169,7 @@ public class CycleVaryWindow {
         Scene scene = new Scene(root);
         stage.setScene(scene);
         stage.setTitle(windowTitle);
+        stage.setOnCloseRequest(event -> cancelActiveOperation());
 
         polygonText.setPrefColumnCount(40);
         polygonText.setPrefRowCount(5);
@@ -415,7 +420,20 @@ public class CycleVaryWindow {
     public void close() {
         // The coordinate editor is useful state even when no CycleVary run is started, so persist it on app shutdown.
         Utils.writeToFile(coordsFileName, coordinateCodeArea.getText());
+        cancelActiveOperation();
         stage.close();
+    }
+
+    private void cancelActiveOperation() {
+        final OperationRegistry.OperationHandle operation =
+                activeOperation;
+        activeOperation = null;
+        if (operation != null) {
+            // abdul 27/07/2026 [closing CycleVary cancels and joins its complete registered resource tree]
+            // abdul 31/07/2026 [latch CycleVary cancellation before retiring its Java operation]
+            Wrapper.requestVaryCancellation();
+            operation.cancel();
+        }
     }
 
     public boolean getMagnificationIsSelected() {
@@ -667,6 +685,12 @@ public class CycleVaryWindow {
      * @param index The index of the coordinate to move to.
      */
     private void moveScreenToLine(int index) {
+        moveScreenToLine(index, null);
+    }
+
+    private void moveScreenToLine(
+            final int index,
+            final ExecutorService renderExecutor) {
         if (index < 0) {
             showMoveScreenAlert("Line number must be a positive, non-zero integer.");
             return;
@@ -681,7 +705,14 @@ public class CycleVaryWindow {
 
         String[] coordinateString = coordinateStrings[index].trim().split(" ");
 
-        viewer.moveScreen(coordinateString[0], coordinateString[1]);
+        if (renderExecutor == null) {
+            viewer.moveScreen(coordinateString[0], coordinateString[1]);
+        } else {
+            // abdul 27/07/2026 [commit CycleVary's moved camera synchronously before it samples raster holes]
+            viewer.moveScreen(
+                    coordinateString[0], coordinateString[1],
+                    renderExecutor);
+        }
     }
 
     /**
@@ -795,8 +826,26 @@ public class CycleVaryWindow {
     }
 
     private void CycleVaryFunction(ConvexPolygon polygon) {
-        final int cycles = extractNumberFromTextField(cyclesTextfield);
-        final int originalSubdivision = extractNumberFromTextField(subdivisionsTextfield);
+        // abdul 28/07/2026 [validate schedule controls before admitting a generation that would otherwise need explicit rollback]
+        final int cycles =
+                extractNumberFromTextField(cyclesTextfield);
+        final int originalSubdivision =
+                extractNumberFromTextField(subdivisionsTextfield);
+        final OperationRegistry.OperationHandle operation;
+        try {
+            // abdul 31/07/2026 [admit CycleVary through the shared native cancellation lifetime]
+            operation = operations.openExclusive(
+                    "CycleVary", OperationRegistry.NATIVE_VARY_OPERATION_KEY);
+        } catch (final RejectedExecutionException exception) {
+            final Alert alert = new Alert(AlertType.INFORMATION);
+            alert.setTitle("CycleVary");
+            alert.setHeaderText("CycleVary operation unavailable");
+            alert.setContentText(exception.getMessage());
+            alert.showAndWait();
+            return;
+        }
+        activeOperation = operation;
+
         final SimpleObjectProperty<Integer> step = new SimpleObjectProperty<>();
         final ProgressMultiTask cyclesProgress = new ProgressMultiTask("CycleVary Cycles %d out of %d", false, 0, cycles);
         final ProgressMultiTask repsProgress = new ProgressMultiTask("CycleVary Reps %d out of %d", false, 0, useRepsCheckBox.isSelected() ? Reps : 1);
@@ -805,13 +854,30 @@ public class CycleVaryWindow {
                 Color.CHOCOLATE, Color.ORANGE, Color.PINK, Color.LIME,
                 Color.PURPLE, Color.TURQUOISE);
 
-        final ExecutorService executor = Executors.newFixedThreadPool(Utils.numThreads);
+        final ExecutorService executor;
+        try {
+            // abdul 27/07/2026 [own the CycleVary draw pool before its first recursive generation starts]
+            executor = operation.own(
+                    Executors.newFixedThreadPool(Utils.numThreads));
+        } catch (final RuntimeException exception) {
+            activeOperation = null;
+            operation.cancel();
+            throw exception;
+        }
         final double originalScale = viewer.map.getScale();
 
         step.setValue(-1);
         step.addListener((o, oldVal, newVal) -> {
             if (newVal == -1) {
-                shutdown(cyclesProgress, repsProgress, executor);
+                shutdown(
+                        cyclesProgress, repsProgress,
+                        operation, true);
+                return;
+            }
+            if (!operation.permitsPublication()) {
+                // abdul 28/07/2026 [ignore later CycleVary schedule callbacks after application cancellation]
+                cyclesProgress.close();
+                repsProgress.close();
                 return;
             }
 
@@ -836,7 +902,11 @@ public class CycleVaryWindow {
                 }
 
                 final String cleanedPolygon = cleanPolygon(polygonString);
-                final String cleanedStablesPre = CoverWindow.cleanStables(viewer.coverWindow.getStablesString(), viewer.pool);
+                // abdul 28/07/2026 [attach CycleVary's cover-cleaning fan-out to the active generation]
+                final String cleanedStablesPre =
+                        CoverWindow.cleanStables(
+                                viewer.coverWindow.getStablesString(),
+                                viewer.pool, operation);
                 final Tuple2<String, String> cleanedTriplesPre = CoverWindow.cleanTriples(viewer.coverWindow.getTriplesString(), viewer.pool);
 
                 final String cleanedTriples = cleanedTriplesPre._1;
@@ -855,7 +925,9 @@ public class CycleVaryWindow {
                     if (newCoordinates.isEmpty()) System.out.println("Covered");
 
                     viewer.loadCover("cover", executor);
-                    shutdown(cyclesProgress, repsProgress, executor);
+                    shutdown(
+                            cyclesProgress, repsProgress,
+                            operation, false);
                     return;
                 } else {
                     System.out.println("Not covered");
@@ -881,29 +953,62 @@ public class CycleVaryWindow {
             if(ColorCycle) curCol = Optional.of(cycleColors.get(rep % cycleColors.length()));
             else curCol = Optional.empty();
 
-            autoCycleVaryFunction(curVals, Optional.of(step), curCol, true, true, executor);
+            autoCycleVaryFunction(
+                    curVals, Optional.of(step), curCol, true, true,
+                    executor, operation);
         });
         cyclesProgress.show();
         repsProgress.show();
-        step.setValue(0);
+        try {
+            step.setValue(0);
+        } catch (final RuntimeException exception) {
+            activeOperation = null;
+            operation.cancel();
+            cyclesProgress.close();
+            repsProgress.close();
+            throw exception;
+        }
     }
 
-    public void shutdown(final ProgressMultiTask cyclesProgress, final ProgressMultiTask repsProgress, final ExecutorService executor) {
-        executor.shutdown();
-        Utils.writeToFile(coordsFileName, coordinateCodeArea.getText());
-        cyclesProgress.close();
-        repsProgress.close();
+    public void shutdown(
+            final ProgressMultiTask cyclesProgress,
+            final ProgressMultiTask repsProgress,
+            final OperationRegistry.OperationHandle operation,
+            final boolean cancelled) {
+        boolean failed = false;
+        try {
+            Utils.writeToFile(
+                    coordsFileName, coordinateCodeArea.getText());
+        } catch (final RuntimeException exception) {
+            failed = true;
+            throw exception;
+        } finally {
+            // abdul 27/07/2026 [terminate the complete CycleVary generation exactly once on every final path]
+            activeOperation = null;
+            cyclesProgress.close();
+            repsProgress.close();
+            if (cancelled || failed) {
+                operation.cancel();
+            } else {
+                operation.complete();
+            }
+        }
     }
 
     public void autoCycleVaryFunction(final Tuple7<ConvexPolygon, Integer, Integer, Integer, Integer, Integer, Integer> polyVals,
                                       final Optional<SimpleObjectProperty<Integer>> step, final Optional<Color> colorOpt,
-                                      final boolean overrideSS, final boolean autoCover, final ExecutorService executor
+                                      final boolean overrideSS, final boolean autoCover, final ExecutorService executor,
+                                      final OperationRegistry.OperationHandle operation
     ) {
 
         // Zhao Yu Li, Jun 27, 2025.
         // Replaced code block with function call.
         Tuple3<Integer, Integer, Integer> startStepEnd = getStartStepEnd(getCoordinatesListLength());
-        if (startStepEnd._1 == null) return;
+        if (startStepEnd._1 == null) {
+            operation.cancel();
+            step.ifPresent(value -> value.set(-1));
+            return;
+        }
 
         // Order is CSmax, OSOmax, OSNOmax, CSmaxSS, OSOmaxSS, OSNOmaxSS
         final int[] maxList = {polyVals._2, polyVals._3, polyVals._4, polyVals._5, polyVals._6, polyVals._7};
@@ -928,39 +1033,62 @@ public class CycleVaryWindow {
         }
         final ProgressMultiTask progress = new ProgressMultiTask("Line: %d, Stopping at: %d", true, startIdx+1, endIdx+1);
         progress.show();
-        final ExecutorService storageExecutor = new PriorityExecutor(Utils.numThreads);
-        final ExecutorService shotExecutor = new PriorityExecutor(Utils.numThreads);
+        // abdul 27/07/2026 [register every per-repetition CycleVary storage and shot pool]
+        final ExecutorService storageExecutor = operation.own(
+                new PriorityExecutor(Utils.numThreads));
+        final ExecutorService shotExecutor = operation.own(
+                new PriorityExecutor(Utils.numThreads));
 
         if(autoCover) viewer.coverWindow.appendStablesInfo("// Start CycleVary");
 
-        drawCycleVary(maxList, subdivisions, autoCover, overrideSS, startIdx, endIdx, stepIdx, area, progress, step, colorOpt, executor, storageExecutor, shotExecutor);
+        drawCycleVary(
+                maxList, subdivisions, autoCover, overrideSS,
+                startIdx, endIdx, stepIdx, area, progress, step,
+                colorOpt, executor, storageExecutor, shotExecutor,
+                operation);
     }
 
     private void drawCycleVary(final int[] max, final int maxSubdivisions, final boolean autoCover, final boolean overrideSS,
                                final int currIdx, final int endIdx, final int stepIdx, final ConvexPolygon area, final ProgressMultiTask overallProgress,
                                final Optional<SimpleObjectProperty<Integer>> step, final Optional<Color> colorOpt,
-                               final ExecutorService drawExecutor, final ExecutorService storageExecutor, final ExecutorService shotExecutor) {
+                               final ExecutorService drawExecutor, final ExecutorService storageExecutor, final ExecutorService shotExecutor,
+                               final OperationRegistry.OperationHandle operation) {
+        // abdul 28/07/2026 [stop recursive CycleVary work at the application generation boundary]
+        if (!operation.permitsPublication()) {
+            overallProgress.close();
+            return;
+        }
         // Move the screen
         lineNumTextField.setText(Integer.toString(currIdx + 1));
-        moveScreenToLine(currIdx);
+        moveScreenToLine(currIdx, drawExecutor);
 
-        final double xMin = Math.max(area.projectX().min, viewer.map.getViewRectangle().intervalX.min);
-        final double xMax = Math.min(area.projectX().max, viewer.map.getViewRectangle().intervalX.max);
-        final double yMin = Math.max(area.projectY().min, viewer.map.getViewRectangle().intervalY.min);
-        final double yMax = Math.min(area.projectY().max, viewer.map.getViewRectangle().intervalY.max);
+        final Optional<billiards.geometry.Rectangle> committedView =
+                viewer.committedViewRectangle();
+        if (committedView.isEmpty()) {
+            operation.cancel();
+            overallProgress.close();
+            step.ifPresent(value -> value.set(-1));
+            return;
+        }
+        final billiards.geometry.Rectangle view = committedView.get();
+        final double xMin = Math.max(
+                area.projectX().min, view.intervalX.min);
+        final double xMax = Math.min(
+                area.projectX().max, view.intervalX.max);
+        final double yMin = Math.max(
+                area.projectY().min, view.intervalY.min);
+        final double yMax = Math.min(
+                area.projectY().max, view.intervalY.max);
 
         final MutableList<Double> points = new FastList<>();
         final MutableList<Double> pointsFiltered = new FastList<>();
         viewer.autoRecurse(xMin, xMax, yMin, yMax, 0, maxSubdivisions, area, points);
-        final Image image = viewer.regionsImageView.getImage();
-        final PixelReader reader = image.getPixelReader();
 
         // Filter out filled pixels
         for(int i = 0; i < points.size(); i += 2) {
-            final int midX = (int) viewer.map.pixelX(points.get(i));
-            final int midY = (int) viewer.map.pixelY(points.get(i+1));
-            int color = reader.getArgb(midX, midY);
-            if(color == 0) {
+            // abdul 27/07/2026 [sample CycleVary points only through the camera committed by its synchronous move render]
+            if (viewer.isCommittedRasterTransparent(
+                    points.get(i), points.get(i + 1))) {
                 pointsFiltered.add(points.get(i));
                 pointsFiltered.add(points.get(i+1));
             }
@@ -973,7 +1101,13 @@ public class CycleVaryWindow {
         int mode = getMode();
         Integer numGroupToPrint = getNumGroupToPrint();
 
-        if (numGroupToPrint == null) return;
+        if (numGroupToPrint == null) {
+            // abdul 28/07/2026 [make invalid CycleVary print configuration terminal instead of leaking all admitted pools]
+            overallProgress.close();
+            operation.cancel();
+            step.ifPresent(value -> value.set(-1));
+            return;
+        }
 
         // Create the task
         final CycleVaryTask task = new CycleVaryTask(pointsFiltered, onScreenCodes, Array.ofAll(max), viewer.pool, storageExecutor, extractNumberFromTextField(shotsText), shotExecutor, viewer.regionsImageView, viewer.map, mode, numGroupToPrint, CSCb.isSelected(), OSOCb.isSelected(), OSNOCb.isSelected());
@@ -986,11 +1120,19 @@ public class CycleVaryWindow {
         final boolean addToAllPositive = allPositiveIsSelected();  // Add code with all-positive iteration patterns
         final boolean addToPlusMinus = plusMinusIsSelected();  // Add code with plus/minus patterns
 
-        if ((addToAllPositive || addToPlusMinus) && viewer.iterateToLimitWindow == null) viewer.iterateToLimitWindow = new IterateToLimitWindow(viewer.pool);
+        if ((addToAllPositive || addToPlusMinus)
+                && viewer.iterateToLimitWindow == null) {
+            // abdul 27/07/2026 [keep lookup workers under Viewer shutdown when Cycle Vary creates the result sink]
+            viewer.iterateToLimitWindow =
+                    new IterateToLimitWindow(viewer.pool, operations);
+        }
 
         // Update screen when change detected
         partials.addListener((ListChangeListener.Change<? extends Storage> c) -> {
-            if(overallProgress.isCancelled()) return; // Don't update after cancel received. This prevents codes being printed after the ending line
+            if (overallProgress.isCancelled()
+                    || !operation.permitsPublication()) {
+                return;
+            }
             while (c.next()) {
                 if(!c.wasAdded()) continue;
                 // Draw all new additions
@@ -1035,11 +1177,16 @@ public class CycleVaryWindow {
         });
 
         task.setOnSucceeded(e -> {
+            if (!operation.permitsPublication()) {
+                overallProgress.close();
+                return;
+            }
 
             final ObservableList<Storage> storages;
             try {
                 storages = task.get();
             } catch (InterruptedException | ExecutionException exception) {
+                operation.cancel();
                 throw new RuntimeException(exception);
             }
 
@@ -1080,8 +1227,7 @@ public class CycleVaryWindow {
             // Run at the next hole
             if(overallProgress.isCancelled()) { // It is possible for cancel to occur before the task is created
                 viewer.callRenderRegions();
-                Utils.shutdownExecutorAsync(storageExecutor);
-                Utils.shutdownExecutorAsync(shotExecutor);
+                operation.cancel();
                 if(overrideSS) {
                     System.out.printf("Override Side Sum maximums: CS - %d, OSO - %d, OSNO - %d%n", max[3], max[4], max[5]);
                 }
@@ -1091,11 +1237,16 @@ public class CycleVaryWindow {
                 // Propagate cancellation for Super
                 step.ifPresent(integerSimpleObjectProperty -> integerSimpleObjectProperty.setValue(-1));
             } else if((currIdx + stepIdx <= endIdx && !AutoPolyVaryLoad.Reverse) || (currIdx + stepIdx >= endIdx && AutoPolyVaryLoad.Reverse)) {
-                drawCycleVary(max, maxSubdivisions, autoCover, overrideSS, currIdx + stepIdx, endIdx, stepIdx, area, overallProgress, step, colorOpt, drawExecutor, storageExecutor, shotExecutor);
+                drawCycleVary(
+                        max, maxSubdivisions, autoCover, overrideSS,
+                        currIdx + stepIdx, endIdx, stepIdx, area,
+                        overallProgress, step, colorOpt, drawExecutor,
+                        storageExecutor, shotExecutor, operation);
             } else {
                 viewer.callRenderRegions();
-                Utils.shutdownExecutorAsync(storageExecutor);
-                Utils.shutdownExecutorAsync(shotExecutor);
+                // abdul 27/07/2026 [close per-repetition pools synchronously while the parent generation retains join ownership]
+                storageExecutor.shutdown();
+                shotExecutor.shutdown();
 
                 if(overrideSS) {
                     System.out.printf("Override Side Sum maximums: CS - %d, OSO - %d, OSNO - %d%n", max[3], max[4], max[5]);
@@ -1140,11 +1291,25 @@ public class CycleVaryWindow {
                 }
 
                 // Increment for superPoly
-                step.ifPresent(integerSimpleObjectProperty -> integerSimpleObjectProperty.setValue(integerSimpleObjectProperty.getValue() + 1));
+                try {
+                    // abdul 28/07/2026 [route later repetition-listener failures through the operation terminal path]
+                    step.ifPresent(integerSimpleObjectProperty ->
+                            integerSimpleObjectProperty.setValue(
+                                    integerSimpleObjectProperty.getValue() + 1));
+                } catch (final RuntimeException exception) {
+                    operation.cancel();
+                    overallProgress.close();
+                    throw exception;
+                }
             }
         });
 
         task.setOnCancelled(e -> {
+            if (!operation.permitsPublication()) {
+                overallProgress.close();
+                return;
+            }
+            // abdul 28/07/2026 [preserve user-cancel partials but suppress them when application shutdown already owns cancellation]
             partials.forEach(storage -> {
                 if(!viewer.onScreenSequences.containsKey(storage)) {
                     final Color color;
@@ -1171,8 +1336,7 @@ public class CycleVaryWindow {
                 }
             });
             viewer.callRenderRegions();
-            Utils.shutdownExecutorAsync(storageExecutor);
-            Utils.shutdownExecutorAsync(shotExecutor);
+            operation.cancel();
             if(overrideSS) {
                 System.out.printf("Override Side Sum maximums: CS - %d, OSO - %d, OSNO - %d%n", max[3], max[4], max[5]);
             }
@@ -1184,14 +1348,25 @@ public class CycleVaryWindow {
         });
 
         task.setOnFailed(e -> {
-            //progress.close();
-            Utils.shutdownExecutorAsync(storageExecutor);
-            Utils.shutdownExecutorAsync(shotExecutor);
+            final boolean reportFailure =
+                    operation.permitsPublication();
+            operation.cancel();
             overallProgress.close();
             // Propagate cancellation for Super
             step.ifPresent(integerSimpleObjectProperty -> integerSimpleObjectProperty.setValue(-1));
-            throw new RuntimeException(task.getException());
+            if (reportFailure) {
+                throw new RuntimeException(task.getException());
+            }
         });
-        drawExecutor.execute(task);
+        try {
+            // abdul 27/07/2026 [track both the JavaFX Task and submitted Future for CycleVary shutdown]
+            operation.track(task);
+            operation.track(drawExecutor.submit(task));
+        } catch (final RuntimeException exception) {
+            operation.cancel();
+            overallProgress.close();
+            step.ifPresent(value -> value.set(-1));
+            throw exception;
+        }
     }
 }

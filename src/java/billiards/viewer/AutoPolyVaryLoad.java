@@ -319,4 +319,17 @@ public class AutoPolyVaryLoad {
 	public boolean getAutoSmallCover() {
 		return autoSmallCoverBox.isSelected();
 	}
+
+    public AutoPolyVaryOptions snapshotOptions() {
+        final Integer groups = getNumGroupToPrint();
+        if (groups == null) {
+            throw new IllegalArgumentException(
+                    "AutoPolyVary groups-to-print is invalid.");
+        }
+        // abdul 27/07/2026 [snapshot traversal and publication controls on JavaFX once]
+        return new AutoPolyVaryOptions(
+                reverseBox.isSelected(), getMode(), groups,
+                addToAllPositiveCheckbox.isSelected(),
+                addToPlusMinusCheckbox.isSelected());
+    }
 }

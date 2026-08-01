@@ -24,7 +24,8 @@ Thumbs.db
 
 # Runtime/generated viewer artifacts. Some of these are already tracked in the
 # historical tree; this prevents newly-created local state from being added.
-cover/
+# abdul 27/07/2026 [anchor the runtime cover directory so Java cover package sources remain trackable]
+/cover/
 tmp/
 middleVary3.txt
 iterationPoly.txt

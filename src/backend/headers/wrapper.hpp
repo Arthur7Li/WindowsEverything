@@ -116,7 +116,8 @@ int32_t bounding_polygon(const int32_t* const code_numbers_ptr, const int32_t co
 int32_t load_slope_info(const int32_t* const code_numbers_ptr, const int32_t code_numbers_len, CInfoAll* const cinfoAll, sqlite::ConnectionPool* const pool);
 int32_t load_all_equations(const int32_t* const code_numbers_ptr, const int32_t code_numbers_len, CInfoAll* const cinfoAll, sqlite::ConnectionPool* const pool);
 
-float64_t calculate_gradient(const char* const equation_cstr, float64_t x_value, float64_t y_value, bool from_database, CString* const cstring, CString* const cstring2);
+// abdul 27/07/2026 [declare the gradient result as the int32 status consumed by JNA instead of a mismatched floating-point ABI]
+int32_t calculate_gradient(const char* const equation_cstr, float64_t x_value, float64_t y_value, bool from_database, CString* const cstring, CString* const cstring2);
 
 void cleanup_string(const CString* const cstring);
 
@@ -137,7 +138,22 @@ int vary_3_cpp(const int32_t int_movesMin, const int32_t int_movesMax, const flo
 
 int vary_4_cpp(const int32_t int_movesMin, const int32_t int_movesMax, const float64_t db_xAngle, const float64_t db_yAngle,CString* const result,const char* const reqTypes);
 
-void backend_cancel();        // set flag = true
+/**
+ * @brief Latches cooperative cancellation for the current exclusive native Vary operation.
+ * @return Nothing; the process-owned atomic flag remains true until explicitly reset.
+ * @throws Nothing across the C ABI.
+ */
+// abdul 31/07/2026 [expose durable operation cancellation to the Java progress controls]
+void backend_cancel();
+
+/**
+ * @brief Clears the cooperative cancellation latch for one newly admitted exclusive Vary operation.
+ * @return Nothing; no ownership is transferred.
+ * @throws Nothing across the C ABI.
+ * @pre The Java operation registry owns the global native-Vary exclusive key.
+ */
+// abdul 31/07/2026 [reset cancellation at operation admission instead of inside each queued native call]
+void backend_reset_cancel();
 }
 
 

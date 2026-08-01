@@ -212,6 +212,8 @@ auto transform(const std::vector<T>& vec, const Func& func) {
     // We don't initialize it with the number of elements, because that
     // default constructs the elements, which may not be default constructible.
     std::vector<decltype(func(vec.at(0)))> result{};
+    // abdul 27/07/2026 [reserve the known one-result-per-input size without requiring default-constructible result elements]
+    result.reserve(vec.size());
     std::transform(std::cbegin(vec), std::cend(vec), std::back_inserter(result), func);
 
     return result;

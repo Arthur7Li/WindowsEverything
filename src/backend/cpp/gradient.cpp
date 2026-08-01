@@ -60,8 +60,51 @@ static bool is_pi2_pi2(const Vector2<Interval>& point) {
     return coord0_sign == Sign::ZERO && coord1_sign == Sign::ZERO;
 }
 
-constexpr uint32_t max_exp = 10;
+namespace {
 
+// abdul 28/07/2026 [derive the corner multiplicity search bound from stored frequencies and reject every inexact integer normalization]
+// 20! is the largest factorial representable by the signed 64-bit coefficient
+// type.  A trigonometric polynomial with m stored terms has at most 2m
+// exponential frequencies, so a nonzero directional restriction cannot have
+// multiplicity greater than 2m-1.  Search that expression-derived bound while
+// refusing to overflow the exact coefficient representation.
+constexpr uint32_t max_exact_factorial_order = 20;
+
+Coeff64 exact_divide(
+        const Coeff64 numerator,
+        const Coeff64 denominator,
+        const char* const component,
+        const uint32_t factor_multiplicity) {
+    if (denominator == 0 || numerator % denominator != 0) {
+        std::ostringstream err;
+        err << "non-exact special-corner gradient division for " << component
+            << " at factor multiplicity " << factor_multiplicity
+            << ": " << numerator << " / " << denominator;
+        throw std::runtime_error(err.str());
+    }
+    return numerator / denominator;
+}
+
+Coeff64 remove_normalization_factors(
+        Coeff64 value,
+        const uint32_t factor_multiplicity,
+        const char* const component) {
+    for (uint32_t i = 0; i < factor_multiplicity; ++i) {
+        value = exact_divide(value, 2, component, factor_multiplicity);
+    }
+    return value;
+}
+
+template <typename T>
+uint32_t special_corner_search_limit(const T& equation) {
+    const size_t frequency_bound = 2 * equation.size();
+    return static_cast<uint32_t>(
+        std::min<size_t>(frequency_bound, max_exact_factorial_order - 1));
+}
+
+} // namespace
+
+// abdul 28/07/2026 [recover the (0,pi/2) reduced gradient with exact factorial and power-of-two divisions]
 template <template <typename> class Trig>
 std::pair<Coeff64, Coeff64> gradient_zero_pi2(const LinComMapZ<Trig<LinComArrZ<XY>>>& f) {
     // (0, pi/2)
@@ -69,8 +112,7 @@ std::pair<Coeff64, Coeff64> gradient_zero_pi2(const LinComMapZ<Trig<LinComArrZ<X
 
     // TODO double check the Hessian?
 
-    // (n + 1)!
-    Coeff64 factorial = 1;
+    Coeff64 factorial_n = 1;
 
     // Same type as f
     LinComMapZ<Trig<LinComArrZ<XY>>> diff_a_same{};
@@ -80,10 +122,11 @@ std::pair<Coeff64, Coeff64> gradient_zero_pi2(const LinComMapZ<Trig<LinComArrZ<X
     auto diff_a_different = diff<XY::X>(f);
     auto diff_b_different = diff<XY::Y>(f);
 
-    for (uint32_t n = 1; n < max_exp; ++n) {
+    const uint32_t search_limit = special_corner_search_limit(f);
+    for (uint32_t n = 1; n <= search_limit; ++n) {
 
-        // Update the variables
-        factorial *= (n + 1);
+        factorial_n *= n;
+        const Coeff64 factorial_n_plus_one = factorial_n * (n + 1);
 
         Coeff64 eval_a;
         Coeff64 eval_b;
@@ -91,39 +134,37 @@ std::pair<Coeff64, Coeff64> gradient_zero_pi2(const LinComMapZ<Trig<LinComArrZ<X
             diff_a_different = diff<XY::X>(diff_a_same);
             diff_b_different = diff<XY::X>(diff_b_same);
 
-            eval_a = simplify_lin_com_pi2_pi2(diff_a_different);
-            eval_b = simplify_lin_com_pi2_pi2(diff_b_different);
+            // abdul 27/07/2026 [evaluate recovered derivatives at the actual (0,pi/2) corner instead of the unrelated (pi/2,pi/2) corner]
+            eval_a = simplify_lin_com_zero_pi2(diff_a_different);
+            eval_b = simplify_lin_com_zero_pi2(diff_b_different);
         } else {
             diff_a_same = diff<XY::X>(diff_a_different);
             diff_b_same = diff<XY::X>(diff_b_different);
 
-            eval_a = simplify_lin_com_pi2_pi2(diff_a_same);
-            eval_b = simplify_lin_com_pi2_pi2(diff_b_same);
+            eval_a = simplify_lin_com_zero_pi2(diff_a_same);
+            eval_b = simplify_lin_com_zero_pi2(diff_b_same);
         }
 
         if (eval_a != 0 || eval_b != 0) {
-            // TODO double check this divides properly
-            auto g_a = eval_a / factorial;
-            auto g_b = eval_b * (n + 1) / factorial;
-
-            // Divide out the factors of two
-            for (uint32_t i = 0; i < n; ++i) {
-                g_a /= 2;
-                g_b /= 2;
-            }
+            auto g_a = exact_divide(eval_a, factorial_n_plus_one, "x", n);
+            auto g_b = exact_divide(eval_b, factorial_n, "y", n);
+            g_a = remove_normalization_factors(g_a, n, "x");
+            g_b = remove_normalization_factors(g_b, n, "y");
 
             return {g_a, g_b};
         }
     }
 
     std::ostringstream err;
-    err << "zero gradient after 10 divisions for " << '\n'
+    err << "uncertified zero gradient after " << search_limit
+        << " exact factor divisions for " << '\n'
         << f << '\n'
         << " at (0, pi/2)";
 
     throw std::runtime_error(err.str());
 }
 
+// abdul 28/07/2026 [recover the (pi/2,0) reduced gradient with exact factorial and power-of-two divisions]
 template <template <typename> class Trig>
 std::pair<Coeff64, Coeff64> gradient_pi2_zero(const LinComMapZ<Trig<LinComArrZ<XY>>>& f) {
     // (pi/2, zero)
@@ -131,8 +172,7 @@ std::pair<Coeff64, Coeff64> gradient_pi2_zero(const LinComMapZ<Trig<LinComArrZ<X
 
     // TODO double check the Hessian?
 
-    // (n + 1)!
-    Coeff64 factorial = 1;
+    Coeff64 factorial_n = 1;
 
     // Same type as f
     LinComMapZ<Trig<LinComArrZ<XY>>> diff_a_same{};
@@ -142,10 +182,11 @@ std::pair<Coeff64, Coeff64> gradient_pi2_zero(const LinComMapZ<Trig<LinComArrZ<X
     auto diff_a_different = diff<XY::X>(f);
     auto diff_b_different = diff<XY::Y>(f);
 
-    for (uint32_t n = 1; n < max_exp; ++n) {
+    const uint32_t search_limit = special_corner_search_limit(f);
+    for (uint32_t n = 1; n <= search_limit; ++n) {
 
-        // Update the variables
-        factorial *= (n + 1);
+        factorial_n *= n;
+        const Coeff64 factorial_n_plus_one = factorial_n * (n + 1);
 
         Coeff64 eval_a;
         Coeff64 eval_b;
@@ -153,39 +194,37 @@ std::pair<Coeff64, Coeff64> gradient_pi2_zero(const LinComMapZ<Trig<LinComArrZ<X
             diff_a_different = diff<XY::Y>(diff_a_same);
             diff_b_different = diff<XY::Y>(diff_b_same);
 
-            eval_a = simplify_lin_com_pi2_pi2(diff_a_different);
-            eval_b = simplify_lin_com_pi2_pi2(diff_b_different);
+            // abdul 27/07/2026 [evaluate recovered derivatives at the actual (pi/2,0) corner instead of the unrelated (pi/2,pi/2) corner]
+            eval_a = simplify_lin_com_pi2_zero(diff_a_different);
+            eval_b = simplify_lin_com_pi2_zero(diff_b_different);
         } else {
             diff_a_same = diff<XY::Y>(diff_a_different);
             diff_b_same = diff<XY::Y>(diff_b_different);
 
-            eval_a = simplify_lin_com_pi2_pi2(diff_a_same);
-            eval_b = simplify_lin_com_pi2_pi2(diff_b_same);
+            eval_a = simplify_lin_com_pi2_zero(diff_a_same);
+            eval_b = simplify_lin_com_pi2_zero(diff_b_same);
         }
 
         if (eval_a != 0 || eval_b != 0) {
-            // TODO double check this divides properly
-            auto g_a = eval_a * (n + 1) / factorial;
-            auto g_b = eval_b / factorial;
-
-            // Divide out the factors of two
-            for (uint32_t i = 0; i < n; ++i) {
-                g_a /= 2;
-                g_b /= 2;
-            }
+            auto g_a = exact_divide(eval_a, factorial_n, "x", n);
+            auto g_b = exact_divide(eval_b, factorial_n_plus_one, "y", n);
+            g_a = remove_normalization_factors(g_a, n, "x");
+            g_b = remove_normalization_factors(g_b, n, "y");
 
             return {g_a, g_b};
         }
     }
 
     std::ostringstream err;
-    err << "zero gradient after 10 divisions for " << '\n'
+    err << "uncertified zero gradient after " << search_limit
+        << " exact factor divisions for " << '\n'
         << f << '\n'
         << " at (pi/2, 0)";
 
     throw std::runtime_error(err.str());
 }
 
+// abdul 28/07/2026 [recover the (pi/2,pi/2) reduced gradient without silent truncation or a fixed multiplicity guess]
 template <template <typename> class Trig>
 std::pair<Coeff64, Coeff64> gradient_pi2_pi2(const LinComMapZ<Trig<LinComArrZ<XY>>>& f) {
     // (pi/2, pi/2)
@@ -194,7 +233,7 @@ std::pair<Coeff64, Coeff64> gradient_pi2_pi2(const LinComMapZ<Trig<LinComArrZ<XY
     // TODO double check the Hessian?
 
     Coeff64 sign = 1;
-    Coeff64 factorial = 1;
+    Coeff64 factorial_n = 1;
 
     // Same type as f
     LinComMapZ<Trig<LinComArrZ<XY>>> diff_a_same{};
@@ -204,11 +243,12 @@ std::pair<Coeff64, Coeff64> gradient_pi2_pi2(const LinComMapZ<Trig<LinComArrZ<XY
     auto diff_a_different = diff<XY::X>(f);
     auto diff_b_different = diff<XY::Y>(f);
 
-    for (uint32_t n = 1; n < max_exp; ++n) {
+    const uint32_t search_limit = special_corner_search_limit(f);
+    for (uint32_t n = 1; n <= search_limit; ++n) {
 
-        // Update the variables
         sign *= -1;
-        factorial *= (n + 1);
+        factorial_n *= n;
+        const Coeff64 factorial_n_plus_one = factorial_n * (n + 1);
 
         Coeff64 eval_a;
         Coeff64 eval_b;
@@ -227,22 +267,18 @@ std::pair<Coeff64, Coeff64> gradient_pi2_pi2(const LinComMapZ<Trig<LinComArrZ<XY
         }
 
         if (eval_a != 0 || eval_b != 0) {
-            // TODO double check this divides properly
-            auto g_a = sign * eval_a / factorial;
-            auto g_b = sign * eval_b / factorial;
-
-            // Divide out the factors of two
-            for (uint32_t i = 0; i < n; ++i) {
-                g_a /= 2;
-                g_b /= 2;
-            }
+            auto g_a = exact_divide(sign * eval_a, factorial_n_plus_one, "x", n);
+            auto g_b = exact_divide(sign * eval_b, factorial_n_plus_one, "y", n);
+            g_a = remove_normalization_factors(g_a, n, "x");
+            g_b = remove_normalization_factors(g_b, n, "y");
 
             return {g_a, g_b};
         }
     }
 
     std::ostringstream err;
-    err << "zero gradient after 10 divisions for " << '\n'
+    err << "uncertified zero gradient after " << search_limit
+        << " exact factor divisions for " << '\n'
         << f << '\n'
         << " at (pi/2, pi/2)";
 
@@ -253,7 +289,11 @@ template <template <typename> class Trig>
 std::pair<Coeff64, Coeff64> zero_gradient(const LinComMapZ<Trig<LinComArrZ<XY>>>& lin_com, const Vector2<Interval>& point) {
 
     if (is_zero_zero(point)) {
-
+        // abdul 27/07/2026 [fail closed at the three-factor corner until a unique exact factorization proves which reduced curve owns the boundary]
+        std::ostringstream err;
+        err << "uncertified special-corner gradient at (0, 0): multiple canonical boundary factors may be present\n"
+            << lin_com;
+        throw std::runtime_error(err.str());
     } else if (is_zero_pi2(point)) {
         return gradient_zero_pi2(lin_com);
     } else if (is_pi2_zero(point)) {

@@ -113,6 +113,30 @@ static CodeSequence reported_long_cs() {
         "2 8 2 12 2 8 2 14 4 28 6 34 6 29 1 5 22 5 1 29 6 34 6 29");
 }
 
+/**
+ * @brief Returns the three exact closed-stable codes whose MRRs were rejected in Abdul's 31 July nextIter report.
+ * @return Independently owned parsed code sequences in report order; no external storage is retained.
+ * @throws std::runtime_error If a literal no longer satisfies the code-sequence grammar.
+ * @invariant Each returned sequence classifies as closed stable and previously reached the experimental equal-sign guard.
+ */
+// abdul 31/07/2026 [retain every reported AutoPolyVary MRR failure as a full calculation regression]
+static std::vector<CodeSequence> reported_nextiter_autopolyvary_codes() {
+    // Preserve point 1 candidate 5, the second native failure printed in nextIter.
+    const auto point_one_candidate_five = parse_code_sequence(
+        "1 5 22 4 22 4 20 4 22 4 20 4 24 5 1 33 6 29 1 6 1 27 5 1 33 6 32 6 30 6 33 1 5 24 4 20 4 24 5 1 33 6 30 6 33 1 5 26 4 16 4 28 6 34 6 28 4 16 4 26 4 16 4 26 4 16 4 28 6 34 6 28 4 16 4 26 5 1 33 6 30 6 33 1 5 24 4 20 4 24 5 1 33 6 30 6 32 6 33 1 5 27 1 6 1 29 6 33 1 5 24 4 20 4 22 4 20 4 22 4 22 5 1 30");
+    // Preserve point 1 candidate 6, the first native failure printed in nextIter.
+    const auto point_one_candidate_six = parse_code_sequence(
+        "1 5 24 5 1 31 6 32 6 30 4 14 4 28 5 1 35 6 28 5 1 34 1 5 26 4 16 2 8 2 10 2 14 4 27 1 6 1 29 6 33 1 5 26 5 1 33 6 30 6 34 6 28 5 1 33 6 32 6 30 6 34 6 29 1 6 1 27 5 1 34 1 5 27 1 6 1 29 6 34 6 30 6 32 6 33 1 5 28 6 34 6 30 6 33 1 5 26 5 1 33 6 29 1 6 1 27 4 14 2 10 2 8 2 16 4 26 5 1 34 1 5 28 6 35 1 5 28 4 14 4 30 6 32 6 31");
+    // Preserve point 2 candidate 6, whose maximum frequencies match the third printed failing curve.
+    const auto point_two_candidate_six = parse_code_sequence(
+        "1 5 22 5 1 28 1 6 1 27 4 16 4 26 5 1 33 6 30 4 12 4 31 1 5 26 5 1 33 6 30 6 33 1 5 26 5 1 31 4 12 4 30 6 33 1 5 26 4 16 4 27 1 6 1 28 1 5 22 5 1 29 6 33 1 5 26 5 1 33 6 28 4 16 4 26 5 1 33 6 30 6 33 1 5 26 5 1 32 1 5 26 5 1 33 6 30 6 33 1 5 26 4 16 4 28 6 33 1 5 26 5 1 33 6 29");
+    // Return new values so individual test calculations cannot share mutable boundary state.
+    return {
+        point_one_candidate_five,
+        point_one_candidate_six,
+        point_two_candidate_six};
+}
+
 static uint64_t stable_boundary_hash(const Stable& stable) {
     // The benchmark compares this digest across processes and worker counts.
     // Include interval endpoints and boundary provenance, not only median
@@ -133,10 +157,18 @@ static uint64_t stable_boundary_hash(const Stable& stable) {
         normalized << left_right << '\n';
     }
 
+    // abdul 28/07/2026 [allow opt-in benchmark payload dumps so certificate changes can be audited beyond a digest]
+    const std::string normalized_text = normalized.str();
+    if (std::getenv("BILLIARDS_DUMP_BENCHMARK_BOUNDARY") != nullptr) {
+        std::cout << "BENCH_BOUNDARY_BEGIN\n"
+                  << normalized_text
+                  << "BENCH_BOUNDARY_END" << std::endl;
+    }
+
     // FNV-1a is intentionally simple and stable; this is a regression digest,
     // not a cryptographic authenticity check.
     uint64_t hash = UINT64_C(14695981039346656037);
-    for (const unsigned char value : normalized.str()) {
+    for (const unsigned char value : normalized_text) {
         hash ^= value;
         hash *= UINT64_C(1099511628211);
     }
@@ -181,6 +213,31 @@ BOOST_AUTO_TEST_CASE(test_reported_long_cs_mrr_regression) {
     BOOST_REQUIRE(four_workers);
 
     check_same_stable_boundary(*single_worker, *four_workers);
+}
+
+// abdul 31/07/2026 [require all nextIter AutoPolyVary candidates to produce complete MRRs instead of skips or exceptions]
+BOOST_AUTO_TEST_CASE(test_reported_nextiter_autopolyvary_mrrs_succeed) {
+    // Keep the expensive real MRR calculations in the established slow native gate.
+    if (std::getenv("BILLIARDS_RUN_SLOW_TESTS") == nullptr) {
+        BOOST_TEST_MESSAGE("Skipping nextIter AutoPolyVary MRR regressions; run testBackendSlow to enable them");
+        return;
+    }
+
+    // Restore the process worker limit after this deterministic compatibility check.
+    WorkerCountRestore restore;
+    // Use one worker so this test also covers the smallest supported native budget.
+    billiards_set_worker_count(1);
+    // Calculate every previously rejected code through the same production MRR entry point.
+    for (const auto& code_seq : reported_nextiter_autopolyvary_codes()) {
+        // Confirm the fixture still represents the closed-stable AutoPolyVary candidates from the report.
+        BOOST_REQUIRE(code_seq.type() == CodeType::CS);
+        // A missing value or thrown refinement error is the exact regression this test forbids.
+        const auto stable = calculate_stable(code_seq, code_seq.type());
+        // Require a complete nonempty stable region for publication and database caching.
+        BOOST_REQUIRE(stable);
+        // Require an ordered polygon rather than a degenerate placeholder result.
+        BOOST_REQUIRE_GE(stable->points.size(), 3u);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(benchmark_reported_long_cs_mrr) {

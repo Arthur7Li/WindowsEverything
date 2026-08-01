@@ -42,12 +42,11 @@ boost::optional<TriangleBilliard4> TriangleBilliard4::getNext(bool left) {
     std::vector<Vector2D> tempL = lefts;
     std::vector<Vector2D> tempR = rights;
 
-    Vector2D direc1 = vertexC;
-    direc1.sub(tempR.front());
+    // abdul 27/07/2026 [retain immutable Vector2D subtraction results so Vary4 tests the translated trail directions]
+    Vector2D direc1 = vertexC.sub(tempR.front());
     float64_t newAngle1 = atan3(direc1.y, direc1.x, false);
 
-    Vector2D direc2 = vertexC;
-    direc2.sub(tempL.front());
+    Vector2D direc2 = vertexC.sub(tempL.front());
     float64_t newAngle2 = atan3(direc2.y, direc2.x, true);
 
     if (left) {
@@ -115,8 +114,8 @@ std::vector<Vector2D> TriangleBilliard4::reconfigure(bool left, std::vector<Vect
         int32_t index = 0;
         Vector2D end = R.back();
         for (int32_t i = 0; i < static_cast<int32_t>(L.size()); ++i) {
-            Vector2D direc = end;
-            direc.sub(L[i]);
+            // abdul 27/07/2026 [compute each limiting direction from the trail point instead of discarding the value result]
+            Vector2D direc = end.sub(L[i]);
             float64_t result = std::abs(std::atan2(direc.y, direc.x));
             if (std::abs(specMin) < result) {
                 specMin = result;
@@ -129,11 +128,11 @@ std::vector<Vector2D> TriangleBilliard4::reconfigure(bool left, std::vector<Vect
         int32_t index = 0;
         Vector2D end = L.back();
         for (int32_t i = 0; i < static_cast<int32_t>(R.size()); ++i) {
-            Vector2D direc = end;
+            // abdul 28/07/2026 [subtract the matching right trail entry and retain the immutable result before computing its limiting angle]
+            Vector2D direc = end.sub(R[i]);
             // This branch trims the right-hand candidate list, so compare
             // against R[i]. Using L[i] here can read past L when R is longer
             // and also computes the wrong limiting angle for Vary4.
-            direc.sub(R[i]);
             float64_t result = std::abs(std::atan2(direc.y, direc.x));
             if (std::abs(specMax) > result) {
                 specMax = result;

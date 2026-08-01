@@ -123,12 +123,7 @@ done
 # Return to build root
 cd - > /dev/null
 
-# ... other copy commands
-echo "[INFO] Copying updater.sh to input directory..."
-cp -f "updater.sh" "$INPUT_DIR/"
-chmod +x "$INPUT_DIR/updater.sh"
-
-cp "updater.bat" "$INPUT_DIR/"
+# abdul 28/07/2026 [omit the deleted unauthenticated updater scripts from packaged application inputs]
 
 # === Step 6: Package with jpackage ===
 echo "[INFO] Running jpackage..."

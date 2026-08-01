@@ -22,7 +22,14 @@ import java.util.HashMap;
 import java.util.List; // added jul31,2025 marco
 import java.util.Map;
 import java.util.Optional;//added oct 15,2017 george
+import java.util.Objects;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executors;
 import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.function.Consumer;
+import java.util.function.Function;
 
 import javafx.beans.property.SimpleObjectProperty;
 import javafx.geometry.Insets;
@@ -38,6 +45,9 @@ import javafx.stage.Stage;
 import static billiards.utils.Polygon.cleanPolygon;
 
 public final class CoverWindow {
+    private static final String COVER_OPERATION_KEY = "cover-artifact";
+    private final OperationRegistry operations;
+    private OperationRegistry.OperationHandle activeCoverOperation;
 
     // ------------------------------------------------------------
     private String polygonString;
@@ -83,12 +93,127 @@ public final class CoverWindow {
     private final Stage stage = new Stage();
     private final Scene scene = new Scene(base);
 
+    // abdul 28/07/2026 [make window cancellation stop the native calculation and retire its complete owned operation]
+    private void cancelActiveCoverOperation() {
+        final OperationRegistry.OperationHandle operation =
+                activeCoverOperation;
+        activeCoverOperation = null;
+        if (operation != null) {
+            // abdul 31/07/2026 [route cover-window cancellation through the shared Java/native cancellation latch]
+            Wrapper.requestVaryCancellation();
+            operation.cancel();
+            calcBtn.setDisable(false);
+        }
+    }
+
+    private <T> void runCoverTask(
+            final String title,
+            final Function<OperationRegistry.OperationHandle,
+                    javafx.concurrent.Task<T>> taskFactory,
+            final Consumer<T> publishResult) {
+        final OperationRegistry.OperationHandle operation;
+        try {
+            operation = operations.openExclusive(
+                    title, COVER_OPERATION_KEY);
+        } catch (final RejectedExecutionException exception) {
+            final Alert alert = new Alert(AlertType.INFORMATION);
+            alert.setTitle(title);
+            alert.setHeaderText("Cover operation unavailable");
+            alert.setContentText(exception.getMessage());
+            alert.showAndWait();
+            return;
+        }
+
+        final javafx.concurrent.Task<T> task;
+        try {
+            // abdul 27/07/2026 [create cover Tasks after admission so nested native/database pools can share the operation lifetime]
+            task = taskFactory.apply(operation);
+        } catch (final RuntimeException exception) {
+            operation.cancel();
+            showCoverFailure(title, exception);
+            return;
+        }
+
+        activeCoverOperation = operation;
+        calcBtn.setDisable(true);
+        task.setOnSucceeded(event -> {
+            activeCoverOperation = null;
+            if (!operation.permitsPublication()) {
+                calcBtn.setDisable(false);
+                return;
+            }
+            try {
+                // abdul 28/07/2026 [never load or publish a Cover generation after application/window cancellation]
+                publishResult.accept(task.getValue());
+                operation.complete();
+            } catch (final RuntimeException exception) {
+                operation.cancel();
+                showCoverFailure(title, exception);
+            } finally {
+                calcBtn.setDisable(false);
+            }
+        });
+        task.setOnCancelled(event -> {
+            activeCoverOperation = null;
+            operation.cancel();
+            calcBtn.setDisable(false);
+            System.out.println("// " + title + " cancelled");
+        });
+        task.setOnFailed(event -> {
+            activeCoverOperation = null;
+            final boolean reportFailure =
+                    operation.permitsPublication();
+            operation.cancel();
+            calcBtn.setDisable(false);
+            if (reportFailure) {
+                showCoverFailure(title, task.getException());
+            }
+        });
+
+        try {
+            // abdul 27/07/2026 [replace daemon cover Threads with a registered executor and tracked Task/Future]
+            final ExecutorService executor = operation.own(
+                    Executors.newSingleThreadExecutor());
+            operation.track(task);
+            operation.track(executor.submit(task));
+        } catch (final RuntimeException exception) {
+            activeCoverOperation = null;
+            operation.cancel();
+            calcBtn.setDisable(false);
+            showCoverFailure(title, exception);
+        }
+    }
+
+    private static void showCoverFailure(
+            final String title,
+            final Throwable failure) {
+        final Alert alert = new Alert(AlertType.ERROR);
+        alert.setTitle("Cover Failed");
+        alert.setHeaderText(title + " failed");
+        alert.setContentText(
+                failure == null ? "Unknown cover error"
+                        : Objects.toString(
+                                failure.getMessage(),
+                                failure.getClass().getSimpleName()));
+        alert.show();
+        if (failure != null) {
+            failure.printStackTrace();
+        }
+    }
+
     public CoverWindow(final String windowTitle, final ConnectionPool pool,
-    				   final TextField mainLabel, final Runnable loadCover, final Viewer viewer) {
+                       final TextField mainLabel, final Runnable loadCover,
+                       final Viewer viewer,
+                       final OperationRegistry operations) {
+        // abdul 27/07/2026 [bind native cover calculations to the application operation and artifact lifetimes]
+        this.operations = Objects.requireNonNull(operations, "operations");
         stage.setScene(scene);
         stage.setTitle(windowTitle);
 
-        stage.setOnCloseRequest(event -> saveToFile());
+        stage.setOnCloseRequest(event -> {
+            saveToFile();
+            cancelActiveCoverOperation();
+        });
 
         base.setOnMouseExited(event -> saveToFile());
 
@@ -178,28 +303,29 @@ public final class CoverWindow {
                 final String cleanedPolygon = cleanPolygon(polygonString);
                 final boolean addToSmallCover = viewer.smallCoverWindow != null && addToSmallCoverCB.isSelected();
 
-                calcBtn.setDisable(true);
-
                 // Cover can spend minutes in native GMP/MPFR work. Run that
                 // work off the JavaFX Application Thread so the window can
                 // repaint and the OS does not mark the app as unresponsive.
-                final javafx.concurrent.Task<String> task = new javafx.concurrent.Task<String>() {
-                    @Override
-                    protected String call() {
-                        final String cleanedStablesPre = cleanStables(stablesString, pool);
-                        final Tuple2<String, String> cleanedTriplesPre = cleanTriples(triplesString, pool);
-                        final String cleanedTriples = cleanedTriplesPre._1;
-                        final String cleanedStables = (cleanedStablesPre + '\n' + cleanedTriplesPre._2).trim();
+                runCoverTask("Cover calculation", operation ->
+                        new javafx.concurrent.Task<String>() {
+                            @Override
+                            protected String call() {
+                                final String cleanedStablesPre =
+                                        cleanStables(stablesString, pool, operation);
+                                final Tuple2<String, String> cleanedTriplesPre =
+                                        cleanTriples(triplesString, pool);
+                                final String cleanedTriples = cleanedTriplesPre._1;
+                                final String cleanedStables =
+                                        (cleanedStablesPre + '\n'
+                                                + cleanedTriplesPre._2).trim();
 
-                        return Wrapper.coverWrapper(cleanedPolygon, cleanedStables, cleanedTriples,
-                                digits, magnifications, empty, true, pool);
-                    }
-                };
-
-                task.setOnSucceeded(e -> {
-                    calcBtn.setDisable(false);
-                    final String res = task.getValue();
-
+                                return CoverArtifactService.callWithArtifactLock(
+                                        () -> Wrapper.coverWrapper(
+                                                cleanedPolygon, cleanedStables,
+                                                cleanedTriples, digits,
+                                                magnifications, empty, true, pool));
+                            }
+                        }, res -> {
                     if (addToSmallCover) {
                         viewer.smallCoverWindow.addPolygons(res);
                     }
@@ -210,23 +336,6 @@ public final class CoverWindow {
                     redoInfo();
                     stage.close();
                 });
-
-                task.setOnFailed(e -> {
-                    calcBtn.setDisable(false);
-                    final Throwable failure = task.getException();
-                    final Alert alert = new Alert(AlertType.ERROR);
-                    alert.setTitle("Cover Failed");
-                    alert.setHeaderText("Cover calculation failed");
-                    alert.setContentText(failure == null ? "Unknown cover error" : failure.getMessage());
-                    alert.show();
-                    if (failure != null) {
-                        failure.printStackTrace();
-                    }
-                });
-
-                final Thread thread = new Thread(task, "cover-calculation");
-                thread.setDaemon(true);
-                thread.start();
             } else {
 
                 final DirectoryChooser chooser = new DirectoryChooser();
@@ -240,43 +349,26 @@ public final class CoverWindow {
                 }
 
                 final String dirPath = dir.getPath();
-                calcBtn.setDisable(true);
-
                 // The all-cover path is also native-heavy, so it gets the same
                 // JavaFX Task treatment as the normal MRR cover calculation.
-                final javafx.concurrent.Task<Void> task = new javafx.concurrent.Task<Void>() {
-                    @Override
-                    protected Void call() {
-                        Wrapper.coverWrapperAll(dirPath, pool, magnifications);
-                        return null;
-                    }
-                };
-
-                task.setOnSucceeded(e -> {
-                    calcBtn.setDisable(false);
+                runCoverTask("All-cover calculation", operation ->
+                        new javafx.concurrent.Task<Void>() {
+                            @Override
+                            protected Void call() {
+                                return CoverArtifactService.callWithArtifactLock(
+                                        () -> {
+                                            Wrapper.coverWrapperAll(
+                                                    dirPath, pool, magnifications);
+                                            return null;
+                                        });
+                            }
+                        }, ignored -> {
                     loadCover.run();
                     System.out.println(windowTitle.replace("Cover", "BilliardViewer"));
                     saveToFile();
                     redoInfo();
                     stage.close();
                 });
-
-                task.setOnFailed(e -> {
-                    calcBtn.setDisable(false);
-                    final Throwable failure = task.getException();
-                    final Alert alert = new Alert(AlertType.ERROR);
-                    alert.setTitle("Cover Failed");
-                    alert.setHeaderText("Cover calculation failed");
-                    alert.setContentText(failure == null ? "Unknown cover error" : failure.getMessage());
-                    alert.show();
-                    if (failure != null) {
-                        failure.printStackTrace();
-                    }
-                });
-
-                final Thread thread = new Thread(task, "cover-all-calculation");
-                thread.setDaemon(true);
-                thread.start();
             }
         });
 
@@ -711,6 +803,14 @@ public final class CoverWindow {
    * This function is updated to calcualte new code parallel at the same time
    */
    public static String cleanStables(final String string, final ConnectionPool pool) {
+        return cleanStables(string, pool, null);
+   }
+
+   static String cleanStables(
+           final String string,
+           final ConnectionPool pool,
+           final OperationRegistry.OperationHandle operation) {
+        // abdul 28/07/2026 [allow other registered cover workflows to own this nested stable-cleaning pool]
 
         final Iterable<String> lines = Splitter.onPattern("\\R")
                                            .trimResults()
@@ -779,7 +879,12 @@ public final class CoverWindow {
   
         // Make sure Utils.numThreads is set to less than total of thread, 
         // otherwise not all thread are able to connect the database 
-        ForkJoinPool customPool = new ForkJoinPool(Utils.numThreads);
+        final ForkJoinPool customPool = new ForkJoinPool(Utils.numThreads);
+        if (operation != null) {
+            // abdul 27/07/2026 [make Cover stable-cleaning fan-out cancellable and joinable with its admitted operation]
+            operation.own(customPool);
+        }
+        boolean completed = false;
         try {
             customPool.submit(() ->
                 validSequences_fast.parallelStream().forEach(codeSeq -> {
@@ -794,10 +899,20 @@ public final class CoverWindow {
                     }
                 })
             ).get();
-        } catch (Exception e) {
-            throw new RuntimeException("Parallel processing failed", e);
+            completed = true;
+        } catch (final InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException(
+                    "Parallel stable processing was interrupted", exception);
+        } catch (final ExecutionException exception) {
+            throw new RuntimeException(
+                    "Parallel stable processing failed", exception.getCause());
         } finally {
-            customPool.shutdown();
+            if (completed) {
+                customPool.shutdown();
+            } else {
+                customPool.shutdownNow();
+            }
         }
 
         // Second loop: Only handle large stable, valid code sequences
@@ -918,7 +1033,10 @@ public final class CoverWindow {
             postInfo.append("\n");
         }
 
-        Utils.writeToFile("cover/info.txt", postInfo.toString());
+        // abdul 27/07/2026 [serialize live cover metadata writes with staged generation replacement]
+        CoverArtifactService.withArtifactLock(
+                () -> Utils.writeToFile(
+                        "cover/info.txt", postInfo.toString()));
     }
 
     void show() {

@@ -47,6 +47,32 @@ std::vector<T> double_if_odd(const std::vector<T>& vec) {
     return copy;
 }
 
+template <typename CurveMap>
+static void append_curve_map(CurveMap& destination, const CurveMap& source) {
+    for (const auto& entry : source) {
+        auto& destination_values = destination[entry.first];
+        destination_values.insert(
+            destination_values.end(), entry.second.begin(), entry.second.end());
+    }
+}
+
+static CurvesLR merge_curve_results(const std::vector<CurvesLR>& thread_curves) {
+    // abdul 27/07/2026 [append duplicate equation keys from every worker and sort provenance for deterministic restricted and full MRR output]
+    CurvesLR curves;
+    for (const auto& thread_curve : thread_curves) {
+        append_curve_map(curves.first, thread_curve.first);
+        append_curve_map(curves.second, thread_curve.second);
+    }
+
+    for (auto& entry : curves.first) {
+        falgo::sort(entry.second);
+    }
+    for (auto& entry : curves.second) {
+        falgo::sort(entry.second);
+    }
+    return curves;
+}
+
 // TODO we need to change the orientation of the vertices so they are flipped around
 Unfolding::Unfolding(const std::vector<CodeNumber>& tmp_code_numbers, const std::vector<XYZ>& tmp_code_angles) {
 
@@ -513,32 +539,7 @@ CurvesLR Unfolding::generate_curves_lr(const Equation<T>& shooting_vector_x, con
 
     pool.join();
 //std::cout<< "comb" << std::endl;
-    // Merge thread_curves into the final curves
-    CurvesLR curves;
-    for (auto& tc : thread_curves) {
-        // Merge .first
-        for (auto& kv : tc.first) {
-            auto& vec = curves.first[kv.first];
-            vec.insert(vec.end(), kv.second.begin(), kv.second.end());
-        }
-        // Merge .second
-        for (auto& kv : tc.second) {
-            auto& vec = curves.second[kv.first];
-            vec.insert(vec.end(), kv.second.begin(), kv.second.end());
-        }
-    }
-
-    // Sort as before
-    for (auto& kv : curves.first) {
-        auto& vec = kv.second;
-        falgo::sort(vec);
-    }
-    for (auto& kv : curves.second) {
-        auto& vec = kv.second;
-        falgo::sort(vec);
-    }
-
-    return curves;
+    return merge_curve_results(thread_curves);
 }
 
 
@@ -589,16 +590,7 @@ CurvesLR Unfolding::generate_curves_lr(const Equation<T>& shooting_vector_x, con
 
     pool.join();
     //std::cout<< "comb" << std::endl;
-    // Merge results
-    CurvesLR curves;
-    for (const auto& tc : thread_curves) {
-        // Merge .first
-        curves.first.insert(tc.first.begin(), tc.first.end());
-        // Merge .second
-        curves.second.insert(tc.second.begin(), tc.second.end());
-    }
-
-    return curves;
+    return merge_curve_results(thread_curves);
 }
 
 template CurvesLR Unfolding::generate_curves_lr(const Equation<Sin>& shooting_vector_x, const Equation<Cos>& shooting_vector_y, const std::vector<LeftRight>& left_rights) const;

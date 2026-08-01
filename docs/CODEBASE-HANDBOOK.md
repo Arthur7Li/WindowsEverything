@@ -3836,6 +3836,9 @@ deduplication is `O(L*R*path_length)`.
 
 #### 14.13.6 The curve equation shared by all generators
 
+<!-- handbook-entry:cpp:src/backend/cpp/unfolding.cpp:append_curve_map(CurveMap &amp; destination,const CurveMap &amp; source) -->
+<!-- handbook-entry:cpp:src/backend/cpp/unfolding.cpp:merge_curve_results(const std::vector&lt;CurvesLR&gt; &amp; thread_curves) -->
+
 For path vector `p=(p_x,p_y)` and shooting vector `s=(s_x,s_y)`, parallelism is
 the zero cross-product condition
 
@@ -3849,6 +3852,14 @@ their GCD. Both products carry the same omitted factor two, so normalization
 removes it. `divide_out_lines*` then factors special line components and inserts
 the remaining sine/cosine equations; its exhaustive behavior is covered in the
 next section.
+
+`append_curve_map` performs the provenance-preserving merge primitive: for each
+source equation it obtains the destination vector and appends the complete
+source vector. `merge_curve_results` applies that operation to both sine and
+cosine maps for every task-local result, then sorts each final `LeftRight`
+vector. It never deduplicates equal witnesses; duplicate input witnesses remain
+duplicate output witnesses, while task completion order cannot change their
+sorted representation.
 
 <!-- handbook-entry:cpp:src/backend/cpp/unfolding.cpp:Unfolding#generate_curves(const Equation&lt;T&gt; &amp; shooting_vector_x,const Equation&lt;S&gt; &amp; shooting_vector_y,const InitialAngles &amp; initial_angles) const -->
 <!-- handbook-entry:cpp:src/backend/cpp/unfolding.cpp:Unfolding::generate_curves#__anone97af0bc0402()  -->
@@ -3881,13 +3892,13 @@ complete provenance while making results deterministic across worker counts.
 <!-- handbook-entry:cpp:src/backend/cpp/unfolding.cpp:Unfolding::generate_curves_lr#__anone97af0bc0702()  -->
 
 The restricted LR overload partitions the supplied witnesses themselves and
-reconstructs only those paths. This is the Expando shortcut. Its merge differs
-from the unrestricted overload: it uses map-range `insert` rather than appending
-the witness vectors for an equation key already inserted by an earlier task.
-If equal equations occur in multiple chunks, later witnesses are silently lost;
-the result is also not sorted. A one-worker run may retain a different witness
-vector from a multiworker run. This violates the worker-count equivalence
-contract and can make exact supplied-witness comparison fail. **[SOURCE]**
+reconstructs only those paths. This is the Expando shortcut. Before the
+27 July 2026 repair, it used map-range `insert`; equal keys in later worker
+chunks were silently lost and results were not sorted. Both LR overloads now
+call the same append-per-key merge and sort every witness vector. A regression
+duplicates real `1 3 3` provenance across chunks and requires exact output at
+one, two, and four workers. This closes BUG-023 while preserving the historical
+failure explanation. **[SOURCE]**
 
 All four parallel lambdas can call throwing operations (`edges.at`, coefficient
 arithmetic, simplification, division). They do not capture exceptions into a
@@ -6337,11 +6348,11 @@ is symmetric: it rejects `newAngle2 <= specMin`, may append C to the left trail,
 trims the right trail, and reflects across BC. Side and orientation change by
 the same formulas as `TriangleBilliard`.
 
-The current C++ source does **not** execute those two vector differences. It
-copies `vertexC`, calls the value-returning `sub`, discards the result, and then
-computes both angles from the absolute coordinates of C. Branch visibility and
-trail updates can consequently disagree with the Java reference and the Vary4
-derivation.
+Before 27 July 2026 the C++ source did **not** execute those two vector
+differences: it copied `vertexC`, called the value-returning `sub`, discarded
+the result, and computed both angles from absolute coordinates. The repaired
+code assigns both returned differences, matching Java's value semantics and
+the Vary4 derivation.
 
 <!-- handbook-entry:cpp:src/backend/cpp/triangle_billiard4.cpp:TriangleBilliard4#reconfigure(bool left,std::vector&lt;Vector2D&gt; &amp; L,std::vector&lt;Vector2D&gt; &amp; R) -->
 
@@ -6349,10 +6360,10 @@ derivation.
 vertex. On the left it should maximize
 `|atan2((R.last-L[i]).y,(R.last-L[i]).x)|`; on the right it should minimize the
 analogous angle from `L.last-R[i]`. The right branch correctly indexes `R[i]`
-after BUG-002, but both branches again discard the returned subtraction. They
-rank candidates using the absolute endpoint `R.last` or `L.last`, so every loop
-iteration sees the same angle and the chosen index usually has no geometric
-relationship to the candidate vertex.
+after BUG-002. The 27 July 2026 repair also assigns the returned subtraction in
+both branches, so each candidate is ranked by its actual point difference.
+The right-then-left translated fixture at angles `0.7,0.8` locks the corrected
+descendant interval at `1.5` and closes BUG-048.
 
 <!-- handbook-entry:cpp:src/backend/cpp/triangle_billiard4.cpp:TriangleBilliard4#atan3(float64_t y,float64_t x,bool left) -->
 <!-- handbook-entry:cpp:src/backend/cpp/triangle_billiard4.cpp:TriangleBilliard4#mod3(int32_t value) -->
@@ -6488,8 +6499,9 @@ the first message is rethrown after `join`, and an invalid code is simply not
 appended. Because workers append when they finish, result order is scheduling-
 dependent.
 
-The iterator clears the process-wide cancel flag before starting. During DFS,
-cancellation stops the pool, joins workers, and returns the candidates already
+The iterator never clears the process-wide cancel flag. The Java operation
+owner resets it once before native Vary work starts. During DFS, cancellation
+stops the pool, joins workers, and returns the candidates already
 appended; queued but unstarted classifications can be discarded by `stop`.
 Nothing is streamed across JNA while the call is active, so partial native
 results are not visible to Java until the native function returns and the Java
@@ -6558,18 +6570,18 @@ perfectAngle = atan2(current A.y,current A.x) is inside the feasible beam
 requested type contains convert(code).codeType.
 ```
 
-The current C++ line implementing the beam condition calls
-`billiard.between(perfectAngle)`, where `billiard` is the worker's fixed subtree
-root. It should call `frame.cbilliard.between`, as the Java reference does.
-Deeper nodes have updated trails and narrower bounds, so testing the root can
-both admit a ray excluded by the current tower and reject a ray admitted by it.
-This error compounds the broken bound construction in Section 14.26.4.
+Before 27 July 2026 the beam condition called
+`billiard.between(perfectAngle)`, where `billiard` was the worker's fixed
+subtree root. It now calls `frame.cbilliard.between`, as the Java reference
+does. The translated depth-two regression proves the old root admits an angle
+that its descendant rejects. This closes BUG-046's stale-state defect; broader
+candidate-set parity still depends on separately tracked frontier/depth issues.
 
-Every Vary4 subtree calls `iterateFireAway4`, and every call clears the one
-shared cancel flag before traversing. A cancellation can therefore be observed
-by an early worker and then erased by a later-starting worker, which continues
-computing. Flag reset belongs once at the public operation boundary, before any
-worker is posted, rather than inside every worker.
+Every Vary4 subtree calls `iterateFireAway4`, but workers only acquire-load the
+shared cancel flag. Reset occurs once for the admitted Java operation through
+`backend_reset_cancel`, before any worker is posted. A later-starting subtree
+therefore cannot erase cancellation observed by an earlier worker. This closes
+BUG-047 while the native ABI's one bit remains process-global.
 
 The `specMin` and `specMax` iterator parameters are unused; `fireAway4` passes
 `0` and the worker count. They are remnants of the Vary3-shaped interface and
@@ -6654,8 +6666,8 @@ validation protects this entry point.
 As in Vary3, one thread performs DFS and a bounded Boost.Asio pool performs
 `convert` and classification. Result insertion is mutex-protected, exceptions
 are deferred until after `join`, and completion order determines output order.
-The iterator resets cancellation once at its start, which is safe only because
-`fireAwayCS` makes one iterator call per public operation.
+The iterator only polls cancellation. Its Java operation owner resets once
+before native work, so VaryCS follows the same lifecycle as Vary3 and Vary4.
 
 #### 14.27.5 What the user controls, and what a result means
 
@@ -8764,8 +8776,10 @@ is null-safe for the wrapper pointer and frees its string.
 The three Vary exports translate type text, call `fireAwayCS`, `fireAway3`, or
 `fireAway4`, and emit one space-terminated code row per line into `CString`.
 They return `1` or stderr-only `-1`, so inherit BUG-065; Vary4's failure text
-mistakenly says "vary 3." `backend_cancel` relaxed-stores the global flag. It
-does not await, clear, or identify work, and Vary4's reset race remains BUG-047.
+mistakenly says "vary 3." `backend_cancel` release-stores the global flag and
+`backend_reset_cancel` release-stores false at a newly admitted operation
+boundary. Neither awaits nor identifies work, but workers can no longer erase
+cancellation independently; BUG-047 is fixed.
 
 ### 14.35 [PROVISIONAL] Java JNA boundary: native bytes become workflow results
 
@@ -10532,44 +10546,43 @@ The Vary4 catch message says `"vary 3 failed"`. This is a diagnostic-label
 defect, not evidence that Vary3 ran, but it makes stderr-based problem reports
 ambiguous and should be corrected with an endpoint-specific regression test.
 
-#### 14.48.3 Cancellation is process-global, not request-scoped
+#### 14.48.3 Process-global native bit with operation-scoped admission
 
-`backend_cancel` contains only:
+The two native lifecycle stores are:
 
 ```cpp
-cancel_flag().store(true, std::memory_order_relaxed);
+cancel_flag().store(true, std::memory_order_release);
+cancel_flag().store(false, std::memory_order_release);
 ```
 
-The flag is a function-local static `atomic<bool>` shared by every VaryCS,
-Vary3, and Vary4 invocation in the process. The search engines reset it to
-`false` when a run begins and periodically read it with relaxed ordering. This
-is sufficient to avoid a data race on the Boolean itself: no accompanying data
-requires publication ordering. It does **not** associate a cancellation with a
-particular job.
+The function-local `atomic<bool>` is shared by every VaryCS, Vary3, and Vary4
+invocation. Workers never reset it and periodically acquire-load it.
+`backend_reset_cancel` runs once when Java admits a new native-Vary operation.
+Release/acquire ordering makes that lifecycle handoff explicit even though the
+bit has no companion payload. The native ABI still has no request token.
 
-Without admission control, this interleaving is possible:
+The owned sequence is:
 
 ```text
-A starts Vary4, resets flag false
-B starts VaryCS, resets flag false
-user cancels A, sets flag true
-both searches observe true and stop, or a later reset loses the request
+A acquires the shared native-vary operation key and resets false once
+A schedules native calls and subtrees; all workers only load the flag
+Cancel sets the Java latch and native flag true
+active and queued work for A stops; B cannot be admitted until A retires
 ```
 
-That is the underlying shared-cancel/reset problem in BUG-047. The Java wrapper
-contains the present mitigation: `beginNativeVary` obtains one fair
-`NATIVE_VARY_LOCK` before any native Vary call, and `finishNativeVary` releases
-it in `finally`. Therefore normal Java entry points permit one native Vary run
-at a time, while preserving fair queueing rather than failing a later user
-action immediately. This is intentionally a **global lane**; it does not mean
-that Vary algorithms themselves are single-threaded. Each may create bounded
-native worker pools internally.
+`OperationRegistry.NATIVE_VARY_OPERATION_KEY` admits one complete UI workflow
+at a time. Once admitted, `beginNativeVaryOperation` clears the Java latch and
+calls the native reset. Inside the workflow, `beginNativeVary` obtains a fair
+`NATIVE_VARY_LOCK` for each native call and checks the latch after acquisition.
+A waiter interrupted or released after cancellation exits as
+`CancellationException` rather than entering native code. `finishNativeVary`
+releases the lock in `finally`. This closes BUG-047 and the queued-reentry part
+of BUG-289 without making internal native worker pools single-threaded.
 
-The mitigation has a boundary: any future JNI/JNA caller that invokes the C
-exports without that Java lock reintroduces the race, and `backend_cancel` has
-no token to reject a stale cancellation issued near the start of the next run.
-An eventual scalable design needs a per-operation cancellation token passed
-into each engine, not a different atomic memory order.
+A future direct native caller must perform one reset before posting workers and
+must not overlap another owner. True concurrent operations require a future
+per-operation cancellation-token ABI; changing memory ordering cannot provide
+request identity.
 
 #### 14.48.4 What a cancel result means to the caller
 
@@ -10827,8 +10840,9 @@ an operation-level snapshot, so treat configuration as startup-only.
 the three native Vary methods; `beginNativeMrr`/`finishNativeMrr` bracket MRR
 picture/info loading in `finally` blocks. `lockInterruptibly` means a Java task
 can be cancelled while waiting rather than becoming an uninterruptible queued
-request; the code restores the interrupt flag and throws an explanatory
-`IllegalStateException`.
+request. The Vary path restores the interrupt flag and throws
+`CancellationException`, which its owning tasks treat as expected termination;
+the MRR path retains its ordinary failure contract.
 
 The locks do not protect the same state:
 
@@ -10837,8 +10851,9 @@ The locks do not protect the same state:
 | `NATIVE_VARY_LOCK` | C++ VaryCS/Vary3/Vary4 share one global cancel flag | each Vary engine may use native workers |
 | `NATIVE_MRR_LOCK` | one MRR calculation already spends the configured backend worker budget | curve generation/corner classification |
 
-The Vary lock prevents BUG-047's cross-run cancel/reset race for normal Java
-callers. The MRR lock prevents AutoVary from multiplying native worker pools by
+The shared operation key, Java latch, one-time reset, and Vary lock prevent the
+cross-run reset and queued-reentry races for normal Java callers. The MRR lock
+prevents AutoVary from multiplying native worker pools by
 the number of queued outer storage tasks, which would otherwise compete for CPU,
 memory, and SQLite capacity. Fairness gives queued user actions FIFO-style
 admission rather than indefinite barging, but it also means a long MRR job can
@@ -10881,10 +10896,10 @@ the pointer itself carries no reference count.
 `nativeMrrFailure(operation, code)` creates a Java exception carrying the
 current thread's native error. It is the correct bridge for MRR functions that
 clear and remember errors, and distinguishes backend failure from a valid empty
-region. `backend_cancel` is exposed directly because its only native action is
-setting the global Vary flag; it has no return status or per-operation identity.
-Its meaning is therefore constrained by the Vary lock and BUG-047, not by Java
-method visibility.
+region. The native `backend_cancel` and `backend_reset_cancel` declarations are
+private. Public `requestVaryCancellation` first sets the Java latch and then
+signals native work; `beginNativeVaryOperation` clears both layers only for a
+newly admitted owner.
 
 The private native declarations in this block are part of the ABI contract:
 parameter order and JNA types must remain synchronized with `wrapper.hpp`.
@@ -11255,24 +11270,23 @@ diagnostic minimum from Section 14.47. On a successful call both Java methods
 clean both strings in `finally`, which is required because each call allocates
 both outputs.
 
-Their native declaration is currently:
+Their native declaration is:
 
 ```java
 private static native int calculate_gradient(...);
 ```
 
-but the C++ header and definition export:
+The C++ header and definition now export the matching status type:
 
 ```cpp
-float64_t calculate_gradient(...);
+int32_t calculate_gradient(...);
 ```
 
-JNA marshals according to the Java declaration. This return-type mismatch means
-Java is not entitled to receive native `1.0` or `-1.0` correctly; platform ABI
-register conventions can yield garbage or an unrelated value. The subsequent
-comparison with `-1` can therefore accept a failure or reject a success. This
-is BUG-075. Align the declaration to `double` (or intentionally change C++ to
-`int32_t`) and add a JNA success/failure regression test.
+Before 27 July 2026 C++ returned `float64_t`, so JNA marshalled a different
+return ABI and Java's `-1` comparison could read garbage. The native API now
+returns the only values it semantically carries, integer status `1` or `-1`.
+A compile-time native signature assertion and real JNA success/forced-failure
+test close BUG-075.
 
 On an actual native failure these Java methods skip cleanup. Normally no result
 is promised on `-1`, but BUG-073 proves a partial native allocation can exist
@@ -13244,9 +13258,9 @@ the fixed display surface. Its constructor binds the bar directly to
 `task.progressProperty()`, makes the stage application-modal, and uses the
 same cancellation helper from both the Cancel button and the window close
 handler. `close()` hides the stage, `show()` displays it, and
-`incrementWindowCount` replaces the close handler with a counter increment;
-that last legacy hook therefore changes cancellation behavior and should not
-be installed on a live calculation accidentally.
+`incrementWindowCount` installs an `onHidden` observer instead of replacing the
+close handler. Its atomic guard returns the Viewer quota exactly once after
+success, failure, button cancellation, or window-manager close.
 
 `ProgressWithStatus` is the version used by one active task. Its grouped state
 `progress-with-status-ui-state` holds a task, its progress property, an offset,
@@ -13274,17 +13288,12 @@ existing callers use positive nonzero iteration counts, but the constructor
 does not enforce that precondition. `isCancelled` exposes the visible
 cross-thread cancellation state to recursive orchestration callbacks.
 
-All three helpers use a common private policy: when the task implements
-`GracefullyCancelable`, invoke `requestGracefulCancel`; otherwise call
-`task.cancel()`. Their Cancel buttons additionally call `Wrapper.backend_cancel()`
-first. That reaches the wrapper's global native cancellation lane, which is
-needed for an in-flight native Vary call. The stage close-request handlers do
-**not** call `Wrapper.backend_cancel()`. Closing a progress window with its
-window-manager close control therefore asks a graceful task to stop admitting
-new Java work but can leave the native operation running until its normal
-return. This is BUG-086. It also explains why a window can disappear cleanly
-without the terminal showing a native cancellation result: dialog closure and
-backend cancellation are distinct source paths.
+All three helpers use a common private Java-task policy: when the task
+implements `GracefullyCancelable`, invoke `requestGracefulCancel`; otherwise
+call `task.cancel()`. Both Cancel buttons and stage close-request handlers first
+call `Wrapper.requestVaryCancellation`, setting the Java operation latch before
+signalling the native flag. Window-manager close and button cancellation now
+have the same backend effect; BUG-086 is fixed.
 
 ### 14.75 `PolyVaryTask`: a sequential sampler with concurrent region loading
 
@@ -16975,8 +16984,9 @@ finished    -> unchanged
 ~~~
 
 The callable's volatile check closes the race for workers which start around
-the request. It cannot stop an already-entered native function; Progress also
-requests Wrapper.backend_cancel for native work. By contrast, ordinary
+the request. Progress also calls `Wrapper.requestVaryCancellation` for native
+work, which latches queued admission and signals an already-entered function.
+By contrast, ordinary
 Task cancellation makes the loop cancel remaining Futures with interruption.
 An interrupted wait cancels all, restores the thread interrupt bit, and
 rethrows unless the Task is cancelled. Thus:
@@ -17550,10 +17560,10 @@ task's own cancellation state checks remain necessary: direct Task.cancel,
 executor shutdown, and thread interruption are stronger external paths.
 
 The protocol is an admission-control convention, not an interruption guarantee.
-Once a native GMP/MPFR/SQLite operation has crossed JNA, Java cannot prove that
-it stopped merely because the UI Cancel button closed. Progress separately
-requests Wrapper.backend_cancel, while the task decides when it can safely
-observe that request. Any new implementation must document its partial-result
+Once a native GMP/MPFR/SQLite operation has crossed JNA, Java cannot force an
+instant stop; native code must reach an acquire-load poll. Progress calls
+`Wrapper.requestVaryCancellation`, while the task decides when it can safely
+observe that request and preserve completed work. Any new implementation must document its partial-result
 policy and ensure callers have success-path handling for a gracefully stopped
 run.
 
@@ -18247,6 +18257,17 @@ file-output failure, and Viewer drawing publication.
 <!-- handbook-entry:java:src/java/billiards/viewer/SaveV3Window.java:SaveV3Window#saveM() -->
 <!-- handbook-entry:java:src/java/billiards/viewer/SaveV3Window.java:SaveV3Window#saveL() -->
 <!-- handbook-entry:java:src/java/billiards/viewer/SaveV3Window.java:SaveV3Window#clear() -->
+<!-- handbook-entry:java:src/java/billiards/viewer/SaveV3Window.java:SaveV3Window#saveCodes(final List&lt;String&gt; codes) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/SaveV3Window.java:SaveV3Window#rememberSuccessfulDestination(final Path destination, final int requestedCount) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/SaveV3Window.java:SaveV3Window#showFileError(final String summary, final Exception exception) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/SaveV3FileService.java:SaveV3FileService -->
+<!-- handbook-entry:java:src/java/billiards/viewer/SaveV3FileService.java:SaveV3FileService#SaveV3FileService() -->
+<!-- handbook-entry:java:src/java/billiards/viewer/SaveV3FileService.java:SaveV3FileService#parseDestination(final String destinationText) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/SaveV3FileService.java:SaveV3FileService#parseCount(final String countText, final int availableCodes) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/SaveV3FileService.java:SaveV3FileService#appendPrefixAtomically( final Path destination, final List&lt;String&gt; codes, final int requestedCount) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/SaveV3FileService.java:SaveV3FileService#clearAtomically(final Path destination) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/SaveV3FileService.java:SaveV3FileService#createTemporarySibling(final Path destination) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/SaveV3FileService.java:SaveV3FileService#replaceDestination(final Path temporary, final Path destination) -->
 
 SaveV3Window is the small export window opened by Viewer's **Save V3** button.
 It does not calculate Vary candidates, compare two runs, or query the database.
@@ -18258,6 +18279,40 @@ BoyanMenu lists into a user-selected text file:
 | Save Matching | `BoyanMenu.savePairs` | the last nonempty comparison result produced while **Match V3** was enabled |
 | Save Latest Vary | `BoyanMenu.varySeq` | the printable prefix from the most recent `BoyanMenu.printCodes` invocation |
 | Clear file | no list | truncate the selected file to zero bytes |
+
+**27 July 2026 repair note.** The detailed defect derivations below preserve
+the audited pre-repair behavior for provenance. Current source instead parses
+the visible field into one normalized `.txt` path for every command, validates
+a trimmed count in `1..source.size` before mutation, snapshots the source list,
+and delegates to `SaveV3FileService`. That service stages UTF-8 output in a
+same-directory temporary file, copies existing content for append, writes the
+requested prefix, and atomically replaces the destination when supported.
+Clear stages an empty sibling and replaces only the visible destination.
+Missing and existing files now share the same prefix contract. Validation or
+I/O failure leaves the window open and does not remember a new default.
+This closes BUG-160 through BUG-163; background JavaFX file I/O remains BUG-164.
+
+`saveCodes` is the shared matching/latest boundary. Its caller supplies an
+immutable list snapshot; it parses path and count before opening anything,
+delegates the staged append, remembers state only after success, and otherwise
+shows an error without closing. `rememberSuccessfulDestination` synchronizes
+the compatibility fields and visible text after commit. `showFileError`
+combines a stable operation summary with a nonempty exception detail.
+
+`SaveV3FileService` has no instances; its private constructor prevents
+accidental state. `parseDestination` trims, normalizes to an absolute path,
+requires a case-sensitive `.txt` suffix, an existing parent directory, and
+either a missing destination or regular file. `parseCount` accepts trimmed
+base-10 integers and enforces `1 <= requested <= available`.
+
+`appendPrefixAtomically` validates again, creates a temporary sibling, copies
+an existing destination and attributes into it, appends exactly the prefix in
+UTF-8 with explicit LF separators, closes the writer, and replaces the live
+path. `clearAtomically` replaces with an empty sibling. Both delete staging on
+failure. `replaceDestination` requests `ATOMIC_MOVE` plus replacement and falls
+back to same-directory replacement only when the filesystem explicitly reports
+that atomic moves are unsupported. This fallback prevents descriptor leaks but
+cannot promise crash atomicity on that filesystem.
 
 The word *latest* modifies the Vary **run**, not the position of an element in
 a history. There is no history in SaveV3Window. `printCodes` clears `varySeq`
@@ -23888,27 +23943,16 @@ nondeterministic across the two batches. If result order matters for research
 artifacts, the controller must merge by original file/batch/row order before one
 publication.
 
-#### 14.129.6 Progress quota (BUG-221)
+#### 14.129.6 Progress quota lifecycle
 
 Before showing each Progress, Viewer calls
-`progress.incrementWindowCount(progressWindows)`. Despite its name, that method
-does not increment immediately; it replaces Progress's original Stage
-close-request handler with `count.incrementAndGet()`. Viewer then shows the
-Stage only when the shared counter is positive and decrements it.
-
-Two failures result:
-
-* window-manager close no longer calls Progress's `requestCancel(task)`, and it
-  also omits native backend cancellation from BUG-086;
-* normal task completion calls `progress.close()`/Stage.close, which is
-  equivalent to hide and does not replenish this external-close quota. After
-  five normally completed progress dialogs, the counter reaches zero and later
-  tasks run with no dialog or cancel button.
-
-This is BUG-221. Replace handler mutation and quota bookkeeping with a progress
-manager that retains cancellation semantics and tracks active dialogs in a
-finally/hidden callback. A hidden progress dialog must never be the only owner
-of a task the user may need to cancel.
+`progress.incrementWindowCount(progressWindows)`. The method installs an
+`onHidden` observer and leaves the constructor's close-to-cancel handler intact.
+Viewer shows the Stage only when the shared counter is positive and decrements
+it. When the Stage becomes hidden—whether from success, failure, Cancel, or the
+window manager—an atomic guard increments the quota exactly once. Later tasks
+therefore retain a visible cancellation control after more than five normal
+completions. This fixes BUG-221 and composes with BUG-086's native signal.
 
 Tests for this section require: null file; text versus DB policy defaults;
 10,000/10,001 rows and duplicate rows; malformed/failed tables with a typed
@@ -23995,8 +24039,13 @@ render completes after a newer zoom.
 ### 14.131 Viewer direct Calculate and optional Cover publication
 
 <!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer#btnCalculateAction(final ConnectionPool pool) -->
-<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer#appendCalculatedCodeToCoverIfRequested(final ConnectionPool pool) -->
-<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer#buttonCalulator(final String code, final ConnectionPool pool, final int n) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer#appendCalculatedCodeToCoverIfRequested( final List&lt;Optional&lt;Storage&gt;&gt; calculatedStorages) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer#buttonCalculator(final String code, final ConnectionPool pool, final int n) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer#calculateCurrentCodeNumbersResult(final ConnectionPool pool, final int i) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer#CalculationResult -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer.CalculationResult#output -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer.CalculationResult#storage -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer.CalculationResult#CalculationResult(final String output, final Optional&lt;Storage&gt; storage) -->
 
 `btnCalculateAction` normalizes display annotations with `tripleTrimmer` and
 accepts only one or three comma components. It clears all three current code
@@ -24004,10 +24053,12 @@ lists before handling valid-cardinality input. An empty String counts as one
 component under Java split semantics, so it reaches the dedicated empty alert
 after clearing prior state.
 
-For a triple, it processes components left-to-right through `buttonCalulator`.
+For a triple, it processes components left-to-right through `buttonCalculator`.
 Each valid integer list replaces one current-code slot, rebuilds its plus/minus
-buttons, and calls `calculateCurrentCodeNumbers`. The printed line concatenates
-the three returned descriptions. If any description contains `empty set` and
+buttons, and calls `calculateCurrentCodeNumbersResult`. `CalculationResult` is
+the immutable two-field handoff carrying the exact printable `output` and the
+`Optional<Storage>` produced by that same calculation. The printed line
+concatenates the three returned descriptions. If any description contains `empty set` and
 the combined line did not already start as a comment, the whole triple is
 prefixed `//` so it can be pasted into Cover text without being parsed as a
 usable triple.
@@ -24018,22 +24069,22 @@ result is a partially populated current-code array. Optional Cover publication
 then sees only those populated slots and normally declines to append. A typed
 parse of all components before any mutation would avoid this partial state.
 
-For a single, Viewer calculates slot 0 and explicitly clears/rebuilds button rows
-1 and 2. Both paths finally call
-`appendCalculatedCodeToCoverIfRequested`.
+For a single, Viewer calculates slot 0 and explicitly clears/rebuilds button
+rows 1 and 2. Both paths collect the exact result Storages and finally call
+`appendCalculatedCodeToCoverIfRequested(calculatedStorages)`.
 
 The entire calculation runs in the JavaFX handler. Triple use of
 `Utils.runAndWait` does not move it off-thread because that helper executes
 directly when already on JavaFX. `calculateCurrentCodeNumbers` calls
-Database/native Storage operations and rendering; Cover publication then loads
-the same Storages again. BUG-228 records this responsiveness and duplicate-work
-problem. One background calculation should return the Storages used for drawing,
-printing, and optional Cover admission.
+Database/native Storage operations and rendering. Since the 20 July 2026
+BUG-285 repair, Cover publication reuses those same results rather than
+reclassifying mutable UI state and loading each Storage again. BUG-228 still
+records the JavaFX responsiveness problem.
 
 #### 14.131.1 Cover admission table
 
 If Add to Cover is off, publication returns without database work. Otherwise it
-reclassifies and loads every nonempty current slot; any invalid or absent Storage
+examines the result Optionals from this Calculate invocation; any absent Storage
 silently aborts the entire append. It then admits only:
 
 | loaded family | action |
@@ -24049,10 +24100,12 @@ CoverWindow's contains methods. Calculation success and Cover insertion are
 separate outcomes; the current code gives no visible reason when insertion is
 skipped.
 
-Tests need atomic parse of valid/invalid singles and every triple component,
-partial/empty native results, exact printed comment behavior, all admission
-rows, duplicate suppression, one Storage load per code after repair, user-visible
-skip reasons, and delayed native work proving JavaFX remains responsive.
+The exact formatted 108-number reported OSNO is covered by a database-free
+parse/classification regression. Further tests should cover atomic parse of
+valid/invalid singles and every triple component, partial/empty native results,
+exact printed comment behavior, all admission rows, duplicate suppression,
+user-visible skip reasons, and delayed native work proving JavaFX remains
+responsive.
 
 ### 14.132 Viewer line alerts, pan, and click state machine
 
@@ -27499,16 +27552,15 @@ always pass 3; the public helper's precondition is `n>0`.
 
 `cancel_flag()` returns a reference to one function-local static
 `atomic<bool>`, initially false and shared across translation units. Native
-Vary3, Vary4, and VaryCS each reset it to false on entry and periodically load
-it; `backend_cancel` stores true. Relaxed ordering is sufficient for the bit
-itself because it does not publish companion memory.
+Vary3, Vary4, and VaryCS only acquire-load it. `backend_cancel` release-stores
+true, while `backend_reset_cancel` release-stores false once for a newly
+admitted Java operation.
 
-It is not a request token. Concurrent searches can clear or observe each
-other's cancellation. BUG-047 and Section 14.48 describe the exact reset/cancel
-interleavings and the present Java fair-lock mitigation. The utility-level
-contract remains: only one native Vary request may own this bit at a time, and a
-new direct native caller must join that admission discipline or replace the bit
-with per-operation state. A worker count does not scope cancellation.
+It is not a request token, so the utility-level contract remains: only one
+native Vary operation may own this bit at a time. Section 14.48 describes the
+shared registry key, Java latch, fair lock, and one-time reset that enforce this
+for normal callers. A direct native caller must join that admission discipline
+or introduce per-operation state. A worker count does not scope cancellation.
 
 #### 14.162.5 Configuring Boost and TBB to one worker budget
 
@@ -29225,10 +29277,11 @@ Unlike the array path, Result need not be default constructible. It must be a
 storable value, not a reference. The function preserves input length/order and
 calls func once per element.
 
-The vector path does not reserve `vec.size()`, so an n-element transform can
-perform multiple capacity allocations and move already-produced values. This
-is active in angle-coordinate conversions throughout equation/database paths;
-OPT-025 tracks reserving exact capacity and measuring allocation/throughput.
+Since 27 July 2026 the vector path reserves `vec.size()` before transformation,
+avoiding growth reallocations without resizing or default-constructing result
+elements. Tests cover empty input, order, size, and a deleted default
+constructor. OPT-025 is therefore implemented; whole-MRR timing remains a
+smoke measurement rather than an isolated allocation microbenchmark.
 
 #### 14.168.7 Minimum cyclic rotation
 
@@ -31138,6 +31191,730 @@ they remain unused before deletion.
 <!-- handbook-entry:java:src/java/billiards/viewer/ProgressWithStatus.java:ProgressWithStatus#ProgressWithStatus(final Task&lt;?&gt; task, String formatString, long offset) -->
 <!-- handbook-entry:java:src/java/billiards/viewer/ProgressWithStatus.java:ProgressWithStatus#requestCancel(final Task&lt;?&gt; task) -->
 
+### 14.182 The 2026-07 critical-repair boundary
+
+The July 2026 repair campaign changes several subsystems together because they
+share one release-level invariant: a result may become visible only after the
+mathematical proof, worker generation, render generation, or filesystem
+generation that owns it has succeeded. A successful return from one helper is
+not enough when a different thread can still mutate its inputs, when an
+executor remains alive, or when a live artifact has already been replaced.
+
+The campaign repairs active findings `BUG-034`, `BUG-037`, `BUG-038`,
+`BUG-039`, `BUG-177`, `BUG-178`, `BUG-181`, `BUG-185`, `BUG-186`,
+`BUG-187`, `BUG-188`, `BUG-192`, `BUG-202`, `BUG-203`, `BUG-205`,
+`BUG-212`, `BUG-216`, `BUG-217`, `BUG-219`, `BUG-220`, `BUG-229`,
+`BUG-231`, and `BUG-243`. It also retains the immediately preceding
+evidence-first repairs for `BUG-023`, `BUG-046`, `BUG-048`, `BUG-075`, and
+`BUG-160` through `BUG-163`. `BUG-166` and `BUG-168` belong to Small Cover,
+which the user declared dormant for this campaign. Neither its admission nor
+its computation was silently redesigned.
+
+Four distinctions must survive every future optimization:
+
+1. a proven mathematical result versus an unresolved certificate;
+2. a completed user operation versus a cancelled or superseded generation;
+3. a fully rendered image/camera pair versus an image still being built; and
+4. a validated, switched filesystem generation versus a staging directory.
+
+An unresolved certificate fails closed. A cancelled operation may retain
+partials only where the workflow explicitly promises that behavior. A stale
+render never becomes the camera for a newer image. A failed merge restores the
+prior live cover. These are correctness boundaries, not merely defensive
+checks, and removing them to recover benchmark throughput would reopen the
+corresponding critical defects.
+
+The campaign deliberately does not relocate the Abdul Windows databases,
+alter the `-Xms2g`, `-Xmx6g`, or 2 GiB direct-memory defaults, install an
+updater, or infer trust keys that the repository does not contain.
+
+### 14.183 Certified corner recovery and boundary topology
+
+The native proof layer previously mixed a reliable scalar Newton
+approximation with assumptions about exact roots and connected curve
+components. The repaired layer treats Newton only as a seed. Publication
+requires interval evidence for the common root and for the relevant boundary
+arc.
+
+#### 14.183.1 Exact special-corner gradients
+
+`gradient.cpp` recognizes the special triangle-angle corners before ordinary
+interval gradient evaluation. The `(0, pi/2)` and `(pi/2, 0)` cases now call
+their matching recovery formulas rather than the opposite formula. Each
+formula repeatedly differentiates until it obtains the first nonzero
+coefficient pair, but the search limit is no longer an unexplained fixed
+constant. `special_corner_search_limit` derives a sufficient order from the
+largest stored integer frequency, capped at the largest factorial order that
+fits the exact coefficient representation.
+
+The normalization removed at order \(m\) is \(m!\) together with the power of
+two introduced by the trigonometric corner identities. `exact_divide` checks
+the divisor and the remainder before returning a coefficient.
+`remove_normalization_factors` performs those checked divisions in sequence.
+An overflow, impossible divisor, or non-integral quotient is therefore a
+backend failure instead of silent truncation. The ambiguous `(0, 0)` corner
+is rejected because the existing representation does not provide enough
+information to choose a unique recovery rule.
+
+The optimization constraint is exactness: do not replace these checked
+integer operations with `double`, and do not reinstate a low fixed derivative
+order merely to shorten a rare recovery. The regressions exercise both
+asymmetric corners, normalization divisibility, multiplicity beyond the old
+limit, and the deliberately unsupported origin.
+
+#### 14.183.2 Common-root certification research and production compatibility
+
+`certify_common_root` takes the scalar intersection estimate, performs a
+bounded high-precision Newton polish, evaluates the two-by-two Jacobian at the
+polished center, and rejects a singular center. It then builds a Krawczyk
+operator over successively wider boxes. A box is accepted only when both
+Krawczyk coordinates lie strictly inside it. This proves the existence and
+uniqueness of one common root in that box; independently observing zero in
+each equation's interval range does not.
+
+The returned box is the tightest successful strict-inclusion box, normally
+about \(10^{-30}\) in the long certificate regression. `intersection_unchecked`
+can apply that certificate and the connected-arc topology contracts. These
+functions remain useful research and focused-test machinery, but the
+31 July 2026 `nextIter` regression proved that they are not compatible enough
+to gate the established production MRR corpus.
+
+Production `intersection` therefore calls `intersection_legacy` for the whole
+segment and then each half. The helper runs the established Newton solve,
+checks that the scalar root lies inside the requested segment, wraps it in the
+historical \(10^{-25}\) interval, and rejects it unless exact evaluation of
+both equations returns zero. An exception in one seed is not evidence that
+later seeds contain no valid root. Exhaustion reports both equations and the
+boundary endpoints. This is deliberate compatibility restoration, not a claim
+that the retained strict certificate is mathematically unnecessary.
+
+`intersection_zero` uses the same helper when one endpoint is already a known
+zero. Its seeds preserve the established order: midpoint-to-opposite endpoint,
+the central quarter, then a point displaced one ten-thousandth inward from the
+known zero to the midpoint. Each enclosure must make both exact equation signs
+zero. This avoids converging back to the known endpoint without reintroducing
+the incompatible connected-arc gate.
+
+#### 14.183.3 Connected arcs and hidden crossings
+
+For nonlinear boundaries, an intersection lying inside the endpoint chord's
+axis-aligned slab can still belong to another component. The repaired code
+uses strict derivative signs to identify an implicit graph and verifies that
+the complete root interval lies strictly between its endpoint parameters.
+`certified_same_boundary_arc` handles the basic component test.
+`certified_unique_crossing_on_arc` adds a tangent-determinant or adaptive
+monotonicity proof so an accepted segment contains no second crossing.
+
+The sign helpers intersect natural interval evaluation with a centered
+mean-value enclosure. The tangent determinant
+
+\[
+  B_x C_y-B_y C_x
+\]
+
+is evaluated in natural and centered forms as well. A strict determinant sign
+means the curve value is monotone while travelling along a regular implicit
+boundary graph. `certified_nonzero_on_monotone_implicit_arc` instead bounds
+the maximum curve-value change from an endpoint. These inexpensive proofs are
+attempted before subdivision.
+
+`certified_implicit_arc_property` subdivides one normalized graph parameter
+when the whole hull remains inconclusive. Every accepted piece must prove
+either a strict curve sign or the requested monotonicity property. Its bounded
+depth is a fail-closed resource limit: reaching it returns `false`; it never
+converts uncertainty into a proof.
+
+Straight boundaries receive a stronger treatment. Substituting the exact
+linear equation eliminates the artificial dependency between independent
+`x` and `y` intervals. Equal-sign endpoints are accepted only after every
+parameter piece has strict sign. For a known crossing,
+`certified_unique_crossing_on_line` first tries a derivative sign over the
+whole edge. If a non-root endpoint makes the derivative zero, it searches for
+a derivative-nonzero neighborhood containing the complete Krawczyk root box
+and proves the curve nonzero on both exterior parameter intervals. This
+decomposition proves exactly one root without requiring a false global
+monotonicity claim.
+
+Generalized sine and cosine boundaries can share many symbolic terms with the
+tested curve. On the boundary zero set, replacing \(C\) with \(C+B\) or
+\(C-B\) preserves every value and zero. The specialized overloads try these
+forms only when the result is nonzero and contains fewer terms, then run the
+same rigorous quick certificates. The cosine overload retains its exact
+single-factor and two-term product-identity branch detection before bounded
+implicit subdivision. This cancellation turns the reported Cos/Cos case from
+a greater-than-15-minute dependency explosion into a roughly 12-second
+one-worker calculation without weakening the certificate.
+
+The strict helpers are not currently called as production edge-acceptance
+gates. `refine.cpp` again continues the established subdivision behavior when
+an edge has equal nonzero endpoint signs. Focused concealed-crossing tests
+remain valuable, but future promotion into production must first demonstrate
+compatibility across the established MRR corpus, including all three exact
+`nextIter` candidates.
+
+<!-- handbook-group:critical-repair-native-internals -->
+
+The anonymous namespace, fixed limits, local `ParameterPiece` records,
+visitor-held references, enum values, and lambda closure symbols introduced by
+this proof are grouped as trivial implementation state. Their owners above
+define the behavior; the fields merely carry subdivision endpoints/depth,
+curve/endpoints, or a fixed exact-arithmetic bound. They have no independent
+contract or caller.
+
+### 14.184 Application-owned operations and terminal publication
+
+`OperationRegistry` is the application-lifetime owner for asynchronous Viewer
+work. `Main` constructs one registry and passes it into `Viewer` and the
+dialogs that admit work. The registry assigns a monotonically increasing
+generation to each operation, stores active handles, and optionally reserves
+an exclusive key. Admission and the transition to application shutdown share
+one lock, so a generation cannot slip in after shutdown has taken its active
+snapshot.
+
+`openExclusive` rejects blank keys and rejects overlap while the key's prior
+handle remains registered. The important detail is that terminal does not
+mean retired: `complete` gracefully shuts down owned executors, while
+`cancel` interrupts tracked futures and calls `shutdownNow`. In either case
+the handle remains in the active and exclusive maps until every owned
+executor has actually terminated. This prevents a new VaryL, PolyVary, or
+Tetra/Bar generation from overlapping workers left by its predecessor.
+
+A handle may acquire a Future through `track` and an executor through `own`.
+Both methods perform a second terminal check after insertion to close the race
+with concurrent cancellation. Late resources are cancelled immediately and
+the caller receives `RejectedExecutionException`. Terminal transition is a
+compare-and-set, so duplicate success, error, cancellation, and window-close
+callbacks cannot each publish or release the operation.
+
+`permitsPublication` is the common JavaFX callback guard. It requires both an
+accepting application and a nonterminal generation. Workers check cancellation
+before queueing a partial and callbacks check again when JavaFX eventually
+runs them. Consequently a queued success, render, recursion step, progress
+change, or error dialog cannot resurrect work after its window or application
+has cancelled it. User cancellation still preserves already completed
+partials only in workflows whose contract says so; hard registry shutdown
+does not.
+
+`shutdownAsync` closes admission, cancels a snapshot of every active handle,
+and joins their executors off the JavaFX thread against one shared deadline.
+Only after that future completes does the application destroy the native
+connection pool and exit JavaFX. A timeout is reported as `false`; it is not
+misreported as a clean stop.
+
+The exclusive keys currently partition high-risk workflows:
+
+- `"vary-l"` covers ordinary and Middle VaryL;
+- `"poly-vary"` covers direct, automatic, and SuperPolyVary;
+- `"tetra-bar"` covers grouped Bar/Tetrahedron work;
+- lookup and cover workflows use their own operation identities.
+
+Boyan Vary/Vary3B, Cover, CycleVary, VaryL, PolyVary, AutoPolyVary,
+SuperPolyVary, Tetra/Bar, code loading, cover merge, and lookup now route
+their worker pools, Futures, terminal callbacks, and late-publication checks
+through an operation owner. CycleVary's stable-cleaning `ForkJoinPool` belongs
+to that same generation. Invalid schedule/print inputs are rejected before
+admission where possible; a later listener failure cancels the admitted
+generation. `IterateToLimitWindow.run` remains synchronous to its caller but
+uses `finally` to shut its fixed pool, cancels siblings after interruption,
+restores interrupt status, and suppresses incomplete publication.
+
+<!-- handbook-group:critical-repair-operation-state -->
+
+Registry map fields, atomic flags, labels, generation values, and the
+operation-key constants in owning windows are grouped as trivial state. Their
+meaning and lifecycle are defined by the methods above. The utility-class
+private constructor also has no behavior beyond preventing instantiation.
+
+### 14.185 Immutable generation requests and typed validation
+
+Long-running searches formerly reread JavaFX controls and mutable dialog
+collections after scheduling. A reopened dialog could therefore change a
+running generation. The repaired boundary snapshots and validates all control
+values on JavaFX before worker admission.
+
+`VarySearchRequest` contains move bounds, shot/iteration/step counts, maximum
+printing, and exactly ten code-type flags. Its compact constructor rejects an
+inverted move range, negative counts, null flags, and any flag array of the
+wrong length. It clones the array on input and again on output;
+`primaryTypes` returns only the first five flags. Boyan's Vary, VaryL,
+PolyVary, automatic, and Tetra/Bar paths consume this value rather than the
+fields that produced it.
+
+`TetraBarRequest` copies both point lists, requires groups of exactly two or
+three, checks that sample and original counts describe complete groups,
+requires finite geometry/cut values, and carries one `VarySearchRequest`.
+Each generation owns its result accumulator, so a later run cannot append to
+or publish an earlier run's mutable list.
+
+`AutoPolyVaryOptions` freezes traversal direction, one of three print modes,
+group count, and the two iteration-publication flags.
+`SuperPolyVaryRequest` combines polygon, complete settings, automatic/manual
+mode, subdivision schedule, line range, those automatic options, and the
+Boyan search request. Null components, negative subdivisions, and a zero line
+step are rejected before scheduling.
+
+`SuperPolyVarySettings` is the complete persisted settings value: three
+maximums, three side-sum maximums, three steps, repetitions, publication
+toggles, and optional magnification. Bounds/repetitions must be nonnegative,
+and enabled magnification must be finite and positive.
+`SuperPolyVarySettingsStore` reads only version 1 of the dedicated properties
+schema. A malformed, incomplete, or unsupported file falls back to defaults.
+When no current file exists, legacy import reads maxima from the bounds file
+and steps from the actual step file. Save writes every property to a sibling
+temporary file and replaces the complete generation atomically when the
+filesystem supports it.
+
+The one-point VaryL action creates a separate nonpersistent request, clears
+stale per-invocation results, and rejects a second visible dialog rather than
+overwriting the ordinary multi-point saved list.
+
+Reconstructed storage validation now returns `ValidationStatus`, not a
+boolean that conflates missing evidence with disproval:
+
+- `VALID` means every parsed trigonometric inequality is strictly positive
+  over a conservative hull-radius/Lipschitz enclosure;
+- `INVALID` means at least one sampled point is strictly negative; and
+- `INCONCLUSIVE` covers empty or malformed equations, nonfinite coefficients,
+  boundary values, and insufficient whole-hull separation.
+
+`Utils.verifyInfo` reads `InfoAll.sinEquations` and `cosEquations`, the fields
+the native wrapper actually populates. Each serialized term must provide a
+complete finite coefficient triple. `ParsedTrigInequality` stores whether it
+is sine/cosine, its coefficients, coefficient magnitude, and Lipschitz bound.
+The database reconstruction path deletes a row only on typed `INVALID`;
+`INCONCLUSIVE` takes the slow verification route and cannot cause destructive
+cleanup.
+
+<!-- handbook-group:critical-repair-request-state -->
+
+Record component fields, enum constants, parser carrier fields, immutable
+dialog snapshots, and window-held operation references are grouped as trivial
+state. Their validation, ownership, and publication behavior is wholly
+defined by the constructors and workflows above.
+
+### 14.186 Typed cover triples and transactional artifact publication
+
+`CoverTriple` turns the proof-artifact triple lane into a structural type. Its
+constructor requires three nonnull classified sequences in the exact
+stable-negative, unstable, stable-positive pattern.
+`fromCodes` and `fromStorages` return empty for incomplete arrays, null
+storages, or a wrong classification; `codes` returns a fresh array; and
+`artifactText` emits the existing comma-separated transport form. The Viewer
+validates input triples with their source index before scheduling and appends
+only successfully reconstructed typed triples.
+
+Singles and triples no longer race to stop a shared executor. Each lane owns
+its inner pool under one aggregate registered load generation, and all
+terminal paths close their lane and the aggregate owner.
+
+`CoverArtifactService.replaceMergedCover` normalizes the live path, requires a
+parent, and takes one fair process-wide artifact lock. It creates a unique
+sibling staging directory and invokes the native merge against that directory,
+never against the live cover. Before switching, it requires seven regular,
+non-symlink files:
+
+`info.txt`, `polygon.txt`, `square.txt`, `stables.txt`, `triples.txt`,
+`cover.txt`, and `precision.txt`.
+
+It records each file's SHA-256, byte size, and name in `manifest.sha256`.
+When a live directory exists, the service moves it to a uniquely named
+rollback generation, then moves staging into place. Atomic directory moves
+are preferred, with the platform's same-filesystem move as a defined fallback.
+If the switch fails after moving live, the catch path restores rollback and
+attaches any restoration failure as suppressed evidence. Cleanup walks only
+the unique failed staging tree in reverse order. One successful rollback
+generation is intentionally retained for recovery.
+
+`withArtifactLock` and `callWithArtifactLock` serialize metadata and
+value-returning native writers with merge publication. `CoverWindow` uses the
+same lock for `info.txt`, and the Viewer merge action is a background
+registered operation. It no longer deletes the live cover before merge.
+
+This transaction protects process-local publication and ordinary
+same-filesystem failures. It is not a crash-consistent multi-directory
+journal: the non-atomic fallback can still be interrupted by machine failure,
+and a future cross-process writer would require a filesystem lock. Do not
+delete the rollback generation automatically without a retention/recovery
+policy.
+
+<!-- handbook-group:critical-repair-artifact-state -->
+
+The artifact lock, fixed required-name list, functional callback interface,
+record component fields, and utility constructor are grouped as trivial
+structure. The transaction above is their sole behavioral contract.
+
+### 14.187 Render snapshots and committed camera/raster pairs
+
+Full Viewer rendering now separates capture, background construction, and
+JavaFX commit. `snapshotRenderState` runs on JavaFX and creates a
+`RenderSnapshot` containing:
+
+- a copied `PixelRadianMap`;
+- insertion-ordered region/color pairs;
+- render toggles and parsed offset;
+- copied fill rectangles;
+- copied cover rectangles with colors;
+- every bound polygon/color group; and
+- OBO storage/color state.
+
+Background helpers receive that snapshot, its camera, render options, and
+offset explicitly. They do not read mutable Viewer collections or JavaFX
+controls. `buildRenderedImages` constructs the layers; `commitRenderedImages`
+publishes only if the render generation is still current.
+
+Every request increments a render generation, including the synchronous
+render path. A successful commit stores one `CommittedRaster` carrying the
+region image, optional bound/OBO images, copied camera, render options,
+offset, and generation. This makes the coordinate transform inseparable from
+the pixels it produced.
+
+`CommittedRasterScanner.isTransparentAtPoint` maps radians through that
+committed camera, floors to a pixel, bounds-checks before reading, and accepts
+only an exactly transparent ARGB value. `firstHole` clamps its pixel window,
+skips painted pixels, maps pixel centers through the same camera, and requires
+the reconstructed point to lie inside the requested polygon and outside the
+already-used set. `countTransparent` is a raw diagnostic count.
+`canMutateCommittedRaster` permits incremental drawing only when the caller
+owns the image and the committed generation equals the latest requested
+generation, preventing an older pending render from overwriting it.
+
+`findHole`, `findHoles`, direct PolyVary sampling, and AutoPolyVary recursion
+all require this committed pair and fail closed when none exists.
+`autoRecurse` carries the pair down recursion rather than consulting the
+current camera later. Panning and zooming can therefore request a new render
+without changing the interpretation of a still-committed old image.
+
+<!-- handbook-group:critical-repair-render-carriers -->
+
+Snapshot/committed-raster component fields, colored rectangle/polygon carrier
+fields, Viewer operation references, and generation flags are grouped as
+trivial immutable or atomic state. Their ordering and mutation rules are
+defined by capture/build/commit and scanner behavior above.
+
+### 14.188 Staged Save V3 output and disabled updater
+
+The evidence-first Save V3 repair shares the same generation principle.
+`SaveV3FileService.parseDestination` treats the visible typed or browsed
+field as the sole path, normalizes it, requires a `.txt` regular-file target
+whose parent already exists, and rejects invalid input before opening
+anything. `parseCount` enforces exactly
+\(1 \leq n \leq\) available codes.
+
+Append copies any existing destination to a sibling temporary file, writes
+the requested immutable prefix as UTF-8 lines, closes the writer, and only
+then replaces the destination. Clear similarly switches in an empty sibling;
+it cannot truncate a previously browsed path after the visible field changes.
+Atomic replacement is preferred and a same-directory replacement is the
+fallback. The dialog remembers path/count only after success and reports file
+errors without corrupting the prior destination.
+
+The old automatic updater had no repository-backed authenticity, rollback, or
+safe replacement contract. It is therefore disabled, not cosmetically hidden:
+the button reads `Updates disabled`, its tooltip directs the user to a manual
+trusted install, Viewer no longer imports or calls `Updater`, and these five
+implementations are deleted:
+
+- `src/java/billiards/viewer/Updater.java`;
+- `updater.bat`;
+- `updater.sh`;
+- `app/updater.bat`; and
+- `app/updater.sh`.
+
+`package-windows.bat` and `package-mac.sh` also omit their former updater-copy
+steps. Packaging therefore neither fails on the deleted files nor accidentally
+reintroduces an updater payload; both still copy/package the platform backend
+and runtime as before.
+
+Reintroducing automatic update requires a separately reviewed signed-manifest,
+trusted-key, staged-install, rollback, and Windows process-replacement design.
+Do not restore the deleted download-and-overwrite scripts.
+
+### 14.189 Repair evidence and performance constraints
+
+The initial clean fast gate rebuilt Java and native code, ran 28 JUnit tests,
+and ran the then-current 44 native tests. Later intersection regressions raised
+the native suite to 47. The final clean fast gate rebuilt again and passed all
+28 Java plus 47 native cases in 2 minutes 47 seconds. The complete slow gate
+ran those 47 cases, including the exact reported 124-number CS workload at one
+and four workers, in 29 seconds with equal full boundaries.
+
+An independent exact-HEAD build reproduced the historical normalized hash
+`883e8b0c1317184e`. The now-superseded strict-certificate path produced
+`9f837d3bd0c612a7`. Payload comparison found identical initial angles, seven
+equations, seven `LeftRight` provenance records, and seven roots; only the 14
+interval endpoints changed from roughly \(10^{-25}\) predecessor boxes to
+roughly \(10^{-30}\) strict Krawczyk boxes. This evidence remains useful for
+research, but does not describe the current production path.
+
+Five measured samples at each worker count all produced the repaired hash:
+
+| Workers | Median wall | Range | Median CPU | Maximum working set |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 12,644.050 ms | 12,564.390-12,776.184 ms | 12,468.750 ms | 41,857,024 B |
+| 2 | 10,573.877 ms | 10,472.016-10,627.669 ms | 13,281.250 ms | 49,119,232 B |
+| 4 | 9,476.218 ms | 9,408.298-9,488.579 ms | 13,328.125 ms | 49,537,024 B |
+
+Against the pre-repair medians this is about 27.8%, 74.7%, and 118.2% slower.
+It measured a real cost in the experimental certificate path, not an
+optimization win. Further work under `OPT-027` may profile or improve that
+research path, but it must not replace compatibility behavior until both the
+proof regressions and the complete established MRR corpus pass.
+
+The retained raw matrix is
+`build/benchmarks/20260728-052151-reported-long-cs-mrr-baseline-unverified-skip-build/`.
+It was regenerated after the final clean gate removed the first ignored raw
+directory; the chronological checkpoint preserves both run summaries and
+identifies this second matrix as the durable evidence set.
+
+The exact command/evidence chronology, including failed and superseded runs,
+lives in `docs/release/CRITICAL-REPAIR-CHECKPOINT-2026-07-27.md`. The release
+report is authoritative for validation timestamps; this chapter is
+authoritative for the behavior and constraints future maintainers must
+preserve.
+
+<!-- critical-repair-deep-entry-markers -->
+<!-- handbook-entry:cpp:src/backend/cpp/gradient.cpp:__anon813adda40111#exact_divide(const Coeff64 numerator,const Coeff64 denominator,const char * const component,const uint32_t factor_multiplicity) -->
+<!-- handbook-entry:cpp:src/backend/cpp/gradient.cpp:__anon813adda40111#remove_normalization_factors(Coeff64 value,const uint32_t factor_multiplicity,const char * const component) -->
+<!-- handbook-entry:cpp:src/backend/cpp/gradient.cpp:__anon813adda40111#special_corner_search_limit(const T &amp; equation) -->
+<!-- handbook-entry:cpp:src/backend/headers/intersection.hpp:interval_hull(const Vector2&lt;Real&gt; &amp; first,const Vector2&lt;Real&gt; &amp; second,const Vector2&lt;Interval&gt; &amp; extra) -->
+<!-- handbook-entry:cpp:src/backend/headers/intersection.hpp:interval_strictly_inside(const Interval &amp; inner,const Interval &amp; outer) -->
+<!-- handbook-entry:cpp:src/backend/headers/intersection.hpp:interval_strictly_between(const Interval &amp; value,const Real &amp; first,const Real &amp; second) -->
+<!-- handbook-entry:cpp:src/backend/headers/intersection.hpp:certify_common_root(const EquationGradient&lt;Symbols,T&gt; &amp; eq0,const EquationGradient&lt;Symbols,S&gt; &amp; eq1,const Vector2&lt;Real&gt; &amp; approximation) -->
+<!-- handbook-entry:cpp:src/backend/headers/intersection.hpp:certified_equation_sign_on_box(const EquationType &amp; equation,const Vector2&lt;Interval&gt; &amp; box) -->
+<!-- handbook-entry:cpp:src/backend/headers/intersection.hpp:certified_equation_sign_on_box(const Coeff64 equation,const Vector2&lt;Interval&gt; &amp; box) -->
+<!-- handbook-entry:cpp:src/backend/headers/intersection.hpp:certified_tangent_determinant_enclosure_on_box(const EquationGradient&lt;XY,BoundaryType&gt; &amp; boundary,const EquationGradient&lt;XY,CurveType&gt; &amp; curve,const Vector2&lt;Interval&gt; &amp; box) -->
+<!-- handbook-entry:cpp:src/backend/headers/intersection.hpp:certified_tangent_determinant_sign_on_box(const EquationGradient&lt;XY,BoundaryType&gt; &amp; boundary,const EquationGradient&lt;XY,CurveType&gt; &amp; curve,const Vector2&lt;Interval&gt; &amp; box) -->
+<!-- handbook-entry:cpp:src/backend/headers/intersection.hpp:certified_nonzero_on_monotone_implicit_arc(const EquationGradient&lt;XY,BoundaryType&gt; &amp; boundary,const EquationGradient&lt;XY,CurveType&gt; &amp; curve,const Vector2&lt;Interval&gt; &amp; first,const Vector2&lt;Interval&gt; &amp; second) -->
+<!-- handbook-entry:cpp:src/backend/headers/intersection.hpp:certified_no_hidden_crossing_quick(const EquationGradient&lt;XY,BoundaryType&gt; &amp; boundary,const EquationGradient&lt;XY,CurveType&gt; &amp; curve,const Vector2&lt;Interval&gt; &amp; first,const Vector2&lt;Interval&gt; &amp; second) -->
+<!-- handbook-entry:cpp:src/backend/headers/intersection.hpp:certified_same_boundary_arc(const EquationGradient&lt;Symbols,T&gt; &amp; boundary,const Vector2&lt;Real&gt; &amp; first,const Vector2&lt;Real&gt; &amp; second,const Vector2&lt;Interval&gt; &amp; root) -->
+<!-- handbook-entry:cpp:src/backend/headers/intersection.hpp:ArcProperty -->
+<!-- handbook-entry:cpp:src/backend/headers/intersection.hpp:certified_implicit_arc_property(const EquationGradient&lt;Symbols,T&gt; &amp; boundary,const EquationGradient&lt;Symbols,S&gt; &amp; curve,const Vector2&lt;Interval&gt; &amp; first,const Vector2&lt;Interval&gt; &amp; second,const ArcProperty property) -->
+<!-- handbook-entry:cpp:src/backend/headers/intersection.hpp:certified_unique_crossing_on_arc_impl(const EquationGradient&lt;Symbols,T&gt; &amp; boundary,const EquationGradient&lt;Symbols,S&gt; &amp; curve,const Vector2&lt;Real&gt; &amp; first,const Vector2&lt;Real&gt; &amp; second,const Vector2&lt;Interval&gt; &amp; root) -->
+<!-- handbook-entry:cpp:src/backend/headers/intersection.hpp:certified_unique_crossing_on_arc(const EquationGradient&lt;Symbols,T&gt; &amp; boundary,const EquationGradient&lt;Symbols,S&gt; &amp; curve,const Vector2&lt;Real&gt; &amp; first,const Vector2&lt;Real&gt; &amp; second,const Vector2&lt;Interval&gt; &amp; root) -->
+<!-- handbook-entry:cpp:src/backend/headers/intersection.hpp:certified_unique_crossing_on_arc(const EquationGradient&lt;XY,Equation&lt;Sin&gt;&gt; &amp; boundary,const EquationGradient&lt;XY,Equation&lt;Sin&gt;&gt; &amp; curve,const Vector2&lt;Real&gt; &amp; first,const Vector2&lt;Real&gt; &amp; second,const Vector2&lt;Interval&gt; &amp; root) -->
+<!-- handbook-entry:cpp:src/backend/headers/intersection.hpp:certified_unique_crossing_on_arc(const EquationGradient&lt;XY,LinComArrZ&lt;XYEta&gt;&gt; &amp; boundary,const EquationGradient&lt;XY,S&gt; &amp; curve,const Vector2&lt;Real&gt; &amp; first,const Vector2&lt;Real&gt; &amp; second,const Vector2&lt;Interval&gt; &amp; root) -->
+<!-- handbook-entry:cpp:src/backend/headers/intersection.hpp:interval_hull(const Vector2&lt;Interval&gt; &amp; first,const Vector2&lt;Interval&gt; &amp; second) -->
+<!-- handbook-entry:cpp:src/backend/headers/intersection.hpp:certified_no_hidden_crossing_impl(const EquationGradient&lt;Symbols,T&gt; &amp; boundary,const EquationGradient&lt;Symbols,S&gt; &amp; curve,const Vector2&lt;Interval&gt; &amp; first,const Vector2&lt;Interval&gt; &amp; second) -->
+<!-- handbook-entry:cpp:src/backend/headers/intersection.hpp:certified_no_hidden_crossing(const EquationGradient&lt;Symbols,T&gt; &amp; boundary,const EquationGradient&lt;Symbols,S&gt; &amp; curve,const Vector2&lt;Interval&gt; &amp; first,const Vector2&lt;Interval&gt; &amp; second) -->
+<!-- handbook-entry:cpp:src/backend/headers/intersection.hpp:certified_no_hidden_crossing(const EquationGradient&lt;XY,Equation&lt;Sin&gt;&gt; &amp; boundary,const EquationGradient&lt;XY,Equation&lt;Sin&gt;&gt; &amp; curve,const Vector2&lt;Interval&gt; &amp; first,const Vector2&lt;Interval&gt; &amp; second) -->
+<!-- handbook-entry:cpp:src/backend/headers/intersection.hpp:curve_sign_on_parameter_piece(const EquationType &amp; equation,const DerivativeType &amp; derivative,const Interval &amp; parameter) -->
+<!-- handbook-entry:cpp:src/backend/headers/intersection.hpp:certified_univariate_nonzero(const EquationType &amp; equation,const Interval &amp; full_parameter) -->
+<!-- handbook-entry:cpp:src/backend/headers/intersection.hpp:certified_no_hidden_crossing_on_line(const EquationGradient&lt;XY,LinComArrZ&lt;XYEta&gt;&gt; &amp; boundary,const EquationGradient&lt;XY,LinComMapZ&lt;Trig&lt;LinComArrZ&lt;XY&gt;&gt;&gt;&gt; &amp; curve,const Vector2&lt;Interval&gt; &amp; first,const Vector2&lt;Interval&gt; &amp; second) -->
+<!-- handbook-entry:cpp:src/backend/headers/intersection.hpp:certified_unique_crossing_on_line(const EquationGradient&lt;XY,LinComArrZ&lt;XYEta&gt;&gt; &amp; boundary,const EquationGradient&lt;XY,LinComMapZ&lt;Trig&lt;LinComArrZ&lt;XY&gt;&gt;&gt;&gt; &amp; curve,const Vector2&lt;Real&gt; &amp; first,const Vector2&lt;Real&gt; &amp; second,const Vector2&lt;Interval&gt; &amp; root) -->
+<!-- handbook-entry:cpp:src/backend/headers/intersection.hpp:certified_unique_crossing_on_arc(const EquationGradient&lt;XY,LinComArrZ&lt;XYEta&gt;&gt; &amp; boundary,const EquationGradient&lt;XY,Equation&lt;Sin&gt;&gt; &amp; curve,const Vector2&lt;Real&gt; &amp; first,const Vector2&lt;Real&gt; &amp; second,const Vector2&lt;Interval&gt; &amp; root) -->
+<!-- handbook-entry:cpp:src/backend/headers/intersection.hpp:certified_unique_crossing_on_arc(const EquationGradient&lt;XY,LinComArrZ&lt;XYEta&gt;&gt; &amp; boundary,const EquationGradient&lt;XY,Equation&lt;Cos&gt;&gt; &amp; curve,const Vector2&lt;Real&gt; &amp; first,const Vector2&lt;Real&gt; &amp; second,const Vector2&lt;Interval&gt; &amp; root) -->
+<!-- handbook-entry:cpp:src/backend/headers/intersection.hpp:certified_no_hidden_crossing(const EquationGradient&lt;XY,LinComArrZ&lt;XYEta&gt;&gt; &amp; boundary,const EquationGradient&lt;XY,Equation&lt;Sin&gt;&gt; &amp; curve,const Vector2&lt;Interval&gt; &amp; first,const Vector2&lt;Interval&gt; &amp; second) -->
+<!-- handbook-entry:cpp:src/backend/headers/intersection.hpp:certified_no_hidden_crossing(const EquationGradient&lt;XY,LinComArrZ&lt;XYEta&gt;&gt; &amp; boundary,const EquationGradient&lt;XY,Equation&lt;Cos&gt;&gt; &amp; curve,const Vector2&lt;Interval&gt; &amp; first,const Vector2&lt;Interval&gt; &amp; second) -->
+<!-- handbook-entry:cpp:src/backend/headers/intersection.hpp:certified_no_hidden_crossing(const EquationGradient&lt;XY,LinComArrZ&lt;XYEta&gt;&gt; &amp;,const EquationGradient&lt;XY,S&gt; &amp; curve,const Vector2&lt;Interval&gt; &amp; first,const Vector2&lt;Interval&gt; &amp; second) -->
+<!-- handbook-entry:cpp:src/backend/headers/intersection.hpp:certified_curve_nonzero_on_chord(const EquationGradient&lt;XY,S&gt; &amp; curve,const Vector2&lt;Interval&gt; &amp; first,const Vector2&lt;Interval&gt; &amp; second) -->
+<!-- handbook-entry:cpp:src/backend/headers/intersection.hpp:same_single_cosine_zero_branch(const Equation&lt;Cos&gt; &amp; factor,const Vector2&lt;Interval&gt; &amp; first,const Vector2&lt;Interval&gt; &amp; second) -->
+<!-- handbook-entry:cpp:src/backend/headers/intersection.hpp:certified_no_hidden_crossing_cosine_boundary_impl(const EquationGradient&lt;XY,Equation&lt;Cos&gt;&gt; &amp; boundary,const EquationGradient&lt;XY,S&gt; &amp; curve,const Vector2&lt;Interval&gt; &amp; first,const Vector2&lt;Interval&gt; &amp; second) -->
+<!-- handbook-entry:cpp:src/backend/headers/intersection.hpp:certified_no_hidden_crossing(const EquationGradient&lt;XY,Equation&lt;Cos&gt;&gt; &amp; boundary,const EquationGradient&lt;XY,S&gt; &amp; curve,const Vector2&lt;Interval&gt; &amp; first,const Vector2&lt;Interval&gt; &amp; second) -->
+<!-- handbook-entry:cpp:src/backend/headers/intersection.hpp:certified_no_hidden_crossing(const EquationGradient&lt;XY,Equation&lt;Cos&gt;&gt; &amp; boundary,const EquationGradient&lt;XY,Equation&lt;Cos&gt;&gt; &amp; curve,const Vector2&lt;Interval&gt; &amp; first,const Vector2&lt;Interval&gt; &amp; second) -->
+<!-- handbook-entry:cpp:src/backend/headers/intersection.hpp:intersection_unchecked(const EquationGradient&lt;Symbols,T&gt; &amp; eq0,const EquationGradient&lt;Symbols,S&gt; &amp; eq1,const Vector2&lt;Real&gt; &amp; seed_a,const Vector2&lt;Real&gt; &amp; seed_b,const Vector2&lt;Real&gt; &amp; arc_a,const Vector2&lt;Real&gt; &amp; arc_b,const bool require_unique_crossing) -->
+<!-- handbook-entry:cpp:src/backend/headers/intersection.hpp:NoHiddenCrossingVariant -->
+<!-- handbook-entry:cpp:src/backend/headers/intersection.hpp:NoHiddenCrossingVariant#NoHiddenCrossingVariant(const EquationGradient&lt;Symbols,T&gt; &amp; curve_,const Vector2&lt;Interval&gt; &amp; point0_,const Vector2&lt;Interval&gt; &amp; point1_) -->
+<!-- handbook-entry:cpp:src/backend/headers/intersection.hpp:NoHiddenCrossingVariant#operator ()(const EquationGradient&lt;Symbols,S&gt; &amp; boundary) const -->
+<!-- handbook-entry:java:src/java/billiards/cover/CoverTriple.java:CoverTriple( ClassifiedCodeSequence stableNegative, ClassifiedCodeSequence unstable, ClassifiedCodeSequence stablePositive) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/AutoPolyVaryLoad.java:AutoPolyVaryLoad#snapshotOptions() -->
+<!-- handbook-entry:java:src/java/billiards/viewer/AutoPolyVaryOptions.java:AutoPolyVaryOptions( boolean reverse, int printMode, int groupsToPrint, boolean addToAllPositive, boolean addToPlusMinus) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/BoyanMenu.java:BoyanMenu#BoyanMenu(final Button cycleVaryButton, final Button middleVaryLButton, final Button polyAutoBtn, final Button varyLBtn, final Button autoPolyVaryBtn, final TextField lineStartField, final TextField lineStepField, final TextField lineEndField, final Button superPolyVaryBtn, final CheckBox superAutoCb, final double TipOpenDelay, final double TipCloseDelay, final OperationRegistry operations) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/BoyanMenu.java:BoyanMenu#openVaryOperation( final String title) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/BoyanMenu.java:BoyanMenu#submitVaryTask( final String title, final Task&lt;?&gt; task, final Runnable closeProgress, final OperationRegistry.OperationHandle operation) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/BoyanMenu.java:BoyanMenu#showVaryFailure( final String title, final Throwable failure) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/BoyanMenu.java:BoyanMenu#propagateWorkerFailure( final Exception exception) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/BoyanMenu.java:BoyanMenu#snapshotSearchRequest() -->
+<!-- handbook-entry:java:src/java/billiards/viewer/BoyanMenu.java:BoyanMenu#varyTriangles( final double aX1, final double aY1, final double aX2, final double aY2, final double aX3, final double aY3, final double aCut1, final double aCut2, final int version, final VarySearchRequest request, final ExecutorService exe) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/BoyanMenu.java:BoyanMenu#varyTrianglesL( final Vector2 point, final VarySearchRequest request, final ExecutorService executor) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/BoyanMenu.java:BoyanMenu#varyTrianglesL( final Vector2 point, final int CSmaxSS, final int OSOmaxSS, final int OSNOmaxSS, final VarySearchRequest request, final ExecutorService executor) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/BoyanMenu.java:BoyanMenu#autoVary( final Vector2 point, final VarySearchRequest request, final ExecutorService exe) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/BoyanMenu.java:BoyanMenu#autoVary( final Vector2 point, final int CSmaxSS, final int OSOmaxSS, final int OSNOmaxSS, final VarySearchRequest request, final ExecutorService exe) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/BoyanMenu.java:BoyanMenu#findCodes( final double xCoord, final double yCoord, final int version, final VarySearchRequest request, final ExecutorService exe) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/BoyanMenu.java:BoyanMenu#findCodes4( final double xCoord, final double yCoord, final int min, final int max, final double shots, final boolean[] types, final ExecutorService executor) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/CodeAndPatternLookupWindow.java:CodeAndPatternLookupWindow#CodeAndPatternLookupWindow( final IterateToLimitWindow iterateToLimitWindow, final OperationRegistry operations) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/CodeAndPatternLookupWindow.java:CodeAndPatternLookupWindow#cancelActiveLookup() -->
+<!-- handbook-entry:java:src/java/billiards/viewer/CodeAndPatternLookupWindow.java:CodeAndPatternLookupWindow#showLookupFailure(final Throwable failure) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/CodeAndPatternLookupWindow.java:CodeAndPatternLookupWindow#close() -->
+<!-- handbook-entry:java:src/java/billiards/viewer/CommittedRasterScanner.java:CommittedRasterScanner -->
+<!-- handbook-entry:java:src/java/billiards/viewer/CommittedRasterScanner.java:CommittedRasterScanner#isTransparentAtPoint( final int side, final double rx, final double ry, final PixelRadianMap camera, final IntBinaryOperator argb) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/CommittedRasterScanner.java:CommittedRasterScanner#countTransparent( final int side, final IntBinaryOperator argb) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/CommittedRasterScanner.java:CommittedRasterScanner#canMutateCommittedRaster( final long committedGeneration, final long latestRequestedGeneration, final boolean ownsImage) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/CommittedRasterScanner.java:CommittedRasterScanner#firstHole( final int side, final int xMin, final int xMax, final int yMin, final int yMax, final ConvexPolygon area, final Collection&lt;Vector2&gt; already, final PixelRadianMap camera, final IntBinaryOperator argb) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/CoverArtifactService.java:CoverArtifactService -->
+<!-- handbook-entry:java:src/java/billiards/viewer/CoverArtifactService.java:CoverArtifactService#MergeAction -->
+<!-- handbook-entry:java:src/java/billiards/viewer/CoverArtifactService.java:CoverArtifactService.MergeAction#merge(Path stagingDirectory) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/CoverArtifactService.java:CoverArtifactService#MergeResult(Path liveDirectory, Path rollbackDirectory) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/CoverArtifactService.java:CoverArtifactService#replaceMergedCover( final Path requestedLiveDirectory, final MergeAction mergeAction) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/CoverArtifactService.java:CoverArtifactService#withArtifactLock(final Runnable action) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/CoverArtifactService.java:CoverArtifactService#callWithArtifactLock(final Callable&lt;T&gt; action) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/CoverArtifactService.java:CoverArtifactService#validateAndWriteManifest( final Path stagingDirectory) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/CoverArtifactService.java:CoverArtifactService#sha256(final Path file) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/CoverArtifactService.java:CoverArtifactService#moveDirectory( final Path source, final Path target) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/CoverArtifactService.java:CoverArtifactService#deleteTree(final Path root) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/CoverWindow.java:CoverWindow#cancelActiveCoverOperation() -->
+<!-- handbook-entry:java:src/java/billiards/viewer/CoverWindow.java:CoverWindow#runCoverTask( final String title, final Function&lt;OperationRegistry.OperationHandle, javafx.concurrent.Task&lt;T&gt;&gt; taskFactory, final Consumer&lt;T&gt; publishResult) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/CoverWindow.java:CoverWindow#showCoverFailure( final String title, final Throwable failure) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/CoverWindow.java:CoverWindow#CoverWindow(final String windowTitle, final ConnectionPool pool, final TextField mainLabel, final Runnable loadCover, final Viewer viewer, final OperationRegistry operations) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/CoverWindow.java:CoverWindow#cleanStables( final String string, final ConnectionPool pool, final OperationRegistry.OperationHandle operation) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/CycleVaryWindow.java:CycleVaryWindow#CycleVaryWindow(final String windowTitle, final String buttonText, final String fileName, final String boundsFileName, final String stepFileName, final String coordsFileName, final Viewer viewer, final OperationRegistry operations) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/CycleVaryWindow.java:CycleVaryWindow#cancelActiveOperation() -->
+<!-- handbook-entry:java:src/java/billiards/viewer/CycleVaryWindow.java:CycleVaryWindow#moveScreenToLine( final int index, final ExecutorService renderExecutor) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/CycleVaryWindow.java:CycleVaryWindow#shutdown( final ProgressMultiTask cyclesProgress, final ProgressMultiTask repsProgress, final OperationRegistry.OperationHandle operation, final boolean cancelled) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/CycleVaryWindow.java:CycleVaryWindow#autoCycleVaryFunction(final Tuple7&lt;ConvexPolygon, Integer, Integer, Integer, Integer, Integer, Integer&gt; polyVals, final Optional&lt;SimpleObjectProperty&lt;Integer&gt;&gt; step, final Optional&lt;Color&gt; colorOpt, final boolean overrideSS, final boolean autoCover, final ExecutorService executor, final OperationRegistry.OperationHandle operation ) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/CycleVaryWindow.java:CycleVaryWindow#drawCycleVary(final int[] max, final int maxSubdivisions, final boolean autoCover, final boolean overrideSS, final int currIdx, final int endIdx, final int stepIdx, final ConvexPolygon area, final ProgressMultiTask overallProgress, final Optional&lt;SimpleObjectProperty&lt;Integer&gt;&gt; step, final Optional&lt;Color&gt; colorOpt, final ExecutorService drawExecutor, final ExecutorService storageExecutor, final ExecutorService shotExecutor, final OperationRegistry.OperationHandle operation) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/DrawPictureTaskTriples.java:DrawPictureTaskTriples#DrawPictureTaskTriples( final Array&lt;CoverTriple&gt; triples, final ConnectionPool pool, final ExecutorService executor, boolean print, boolean detailed) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/IterateToLimitWindow.java:IterateToLimitWindow#IterateToLimitWindow( final ConnectionPool pool, final OperationRegistry operations) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/OperationRegistry.java:OperationRegistry -->
+<!-- handbook-entry:java:src/java/billiards/viewer/OperationRegistry.java:OperationRegistry#open(final String label) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/OperationRegistry.java:OperationRegistry#openExclusive(final String label, final String key) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/OperationRegistry.java:OperationRegistry#open(final String label, final String exclusiveKey) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/OperationRegistry.java:OperationRegistry#release(final OperationHandle handle) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/OperationRegistry.java:OperationRegistry#isAccepting() -->
+<!-- handbook-entry:java:src/java/billiards/viewer/OperationRegistry.java:OperationRegistry#activeCount() -->
+<!-- handbook-entry:java:src/java/billiards/viewer/OperationRegistry.java:OperationRegistry#activeExclusive(final String key) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/OperationRegistry.java:OperationRegistry#shutdownAsync(final Duration timeout) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/OperationRegistry.java:OperationRegistry#OperationHandle -->
+<!-- handbook-entry:java:src/java/billiards/viewer/OperationRegistry.java:OperationRegistry.OperationHandle#OperationHandle( final OperationRegistry owner, final long generation, final String label, final String exclusiveKey) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/OperationRegistry.java:OperationRegistry.OperationHandle#generation() -->
+<!-- handbook-entry:java:src/java/billiards/viewer/OperationRegistry.java:OperationRegistry.OperationHandle#label() -->
+<!-- handbook-entry:java:src/java/billiards/viewer/OperationRegistry.java:OperationRegistry.OperationHandle#isCancelled() -->
+<!-- handbook-entry:java:src/java/billiards/viewer/OperationRegistry.java:OperationRegistry.OperationHandle#isTerminal() -->
+<!-- handbook-entry:java:src/java/billiards/viewer/OperationRegistry.java:OperationRegistry.OperationHandle#permitsPublication() -->
+<!-- handbook-entry:java:src/java/billiards/viewer/OperationRegistry.java:OperationRegistry.OperationHandle#track(final T future) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/OperationRegistry.java:OperationRegistry.OperationHandle#own(final T executor) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/OperationRegistry.java:OperationRegistry.OperationHandle#complete() -->
+<!-- handbook-entry:java:src/java/billiards/viewer/OperationRegistry.java:OperationRegistry.OperationHandle#cancel() -->
+<!-- handbook-entry:java:src/java/billiards/viewer/OperationRegistry.java:OperationRegistry.OperationHandle#retireWhenStopped() -->
+<!-- handbook-entry:java:src/java/billiards/viewer/OperationRegistry.java:OperationRegistry.OperationHandle#await(final Duration timeout) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/OperationRegistry.java:OperationRegistry.OperationHandle#close() -->
+<!-- handbook-entry:java:src/java/billiards/viewer/PolyVaryTask.java:PolyVaryTask#PolyVaryTask( final MutableList&lt;Double&gt; points, final MutableSortedSet&lt;ClassifiedCodeSequence&gt; onScreenCodes, final BoyanMenu boyan, final VarySearchRequest searchRequest, final Array&lt;Integer&gt; max, final ConnectionPool pool, final boolean override, final ExecutorService eOne, final ExecutorService eTwo, final ImageView screen, final PixelRadianMap map, final int mode, final int numGroupToPrint) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/SuperPolyVaryLoad.java:SuperPolyVaryLoad#getSettingsSnapshot() -->
+<!-- handbook-entry:java:src/java/billiards/viewer/SuperPolyVaryRequest.java:SuperPolyVaryRequest( ConvexPolygon polygon, SuperPolyVarySettings settings, boolean automatic, int subdivisions, int subdivisionStep, int startIndex, int lineStep, int endIndex, AutoPolyVaryOptions automaticOptions, VarySearchRequest searchRequest) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/SuperPolyVarySettings.java:SuperPolyVarySettings( int csMaximum, int osoMaximum, int osnoMaximum, int csSideSumMaximum, int osoSideSumMaximum, int osnoSideSumMaximum, int csStep, int osoStep, int osnoStep, int repetitions, boolean colorCycle, boolean autoCover, boolean autoSmallCover, boolean magnify, double magnification) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/SuperPolyVarySettingsStore.java:SuperPolyVarySettingsStore -->
+<!-- handbook-entry:java:src/java/billiards/viewer/SuperPolyVarySettingsStore.java:SuperPolyVarySettingsStore#load( final Path file, final Path legacyBounds, final Path legacySteps) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/SuperPolyVarySettingsStore.java:SuperPolyVarySettingsStore#importLegacy( final Path boundsFile, final Path stepsFile) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/SuperPolyVarySettingsStore.java:SuperPolyVarySettingsStore#save(final Path file, final SuperPolyVarySettings settings) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/SuperPolyVarySettingsStore.java:SuperPolyVarySettingsStore#integer( final Properties properties, final String name) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/SuperPolyVarySettingsStore.java:SuperPolyVarySettingsStore#decimal( final Properties properties, final String name) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/SuperPolyVarySettingsStore.java:SuperPolyVarySettingsStore#bool( final Properties properties, final String name) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/SuperPolyVarySettingsStore.java:SuperPolyVarySettingsStore#required( final Properties properties, final String name) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/TetraBarRequest.java:TetraBarRequest( List&lt;Tuple2&lt;Double, Double&gt;&gt; originalPoints, List&lt;Tuple2&lt;Double, Double&gt;&gt; samplePoints, int groupSize, int maximumPrinting, boolean draw, boolean addToCover, double x2, double y2, double x3, double y3, double line1Cut, double line2Cut, VarySearchRequest searchRequest) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Utils.java:Utils#verifyInfo( final InfoAll infoAll, final Storage storage) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Utils.java:Utils#validateReconstructedRegion( final String sinText, final String cosText, final Iterable&lt;Vector2&gt; pointsIterable) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Utils.java:Utils#parseTrigInequalities( final String text, final boolean sine, final ArrayList&lt;ParsedTrigInequality&gt; output) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Utils.java:Utils#ParsedTrigInequality -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Utils.java:Utils.ParsedTrigInequality#ParsedTrigInequality( final boolean sine, final double[] coefficients, final double coefficientMagnitude, final double lipschitz) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Utils.java:Utils.ParsedTrigInequality#evaluate(final double x, final double y) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/ValidationStatus.java:ValidationStatus -->
+<!-- handbook-entry:java:src/java/billiards/viewer/VaryLTask.java:VaryLTask#VaryLTask( final Array&lt;Vector2&gt; points, List&lt;String&gt; coverCodes, final BoyanMenu boyan, final VarySearchRequest searchRequest, final Array&lt;Integer&gt; max, final ConnectionPool pool, final boolean override, final boolean draw, final Integer maxPrint, final ExecutorService eOne, final ExecutorService eTwo, final boolean printMid, final boolean firstLast, boolean addToAllPositive, boolean addToPlusMinus, IterateToLimitWindow iterateToLimitWindow, final int idx, final int step, final int end, final int codesFound) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/VarySearchRequest.java:VarySearchRequest( int minimumMoves, int maximumMoves, int shots, int autoIterations, int autoStep, int maximumPrinting, boolean[] codeTypes) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/VaryWindowL.java:VaryWindowL#getAutoCover() -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer#Viewer(final Stage primaryStage, final String version, final ExecutorService executor, final ConnectionPool pool, final String dbName, final OperationRegistry operations) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer#showOperationAlreadyRunning(final String label) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer#recurseDrawVaryL(final MutableList&lt;Vector2&gt; points, final int[] max, List&lt;String&gt; codeList, final boolean draw, final boolean overrideSS, final boolean autoCover, final boolean autoSmallCover, final int maxPrint, final ExecutorService executor, final ExecutorService storageExecutor, final ExecutorService shotExecutor, final boolean printMid, final boolean firstLast, final boolean addToAllPositive, final boolean addToPlusMinus, final int idx, final int step, final int end, final int codesFound, final ProgressMultiTask overallProgress, final ArrayList&lt;Storage&gt; previousCodes, final VarySearchRequest searchRequest, final OperationRegistry.OperationHandle operation) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer#drawVaryL(final MutableList&lt;Vector2&gt; points, final int[] max, final boolean draw, final boolean overrideSS, final boolean autoCover, final boolean autoSmallCover, final int maxPrint, final ExecutorService executor, final ExecutorService storageExecutor, final ExecutorService shotExecutor, final boolean printMid, final boolean firstLast, final VarySearchRequest searchRequest, final OperationRegistry.OperationHandle operation) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer#fillCommittedScreen(final ExecutorService executor) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer#findHole( final int xMin, final int xMax, final int yMin, final int yMax, final ConvexPolygon area, final FastList&lt;Vector2&gt; already, final CommittedRaster raster) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer#redoFromScratch( final RenderSnapshot snapshot, final ExecutorService executor) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer#drawFills( final PixelWriter writer, final List&lt;Rectangle&gt; fills, final PixelRadianMap renderMap) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer#snapshotRenderState( final LinkedHashMap&lt;Storage, Color&gt; regions) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer#buildRenderedImages( final RenderSnapshot snapshot, final ExecutorService executor) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer#commitRenderedImages( final RenderedImages images, final RenderSnapshot snapshot, final long generation, final ImageView guideLinesImageView, final ImageView regionsImageView) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer#RenderSnapshot -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer.RenderSnapshot#RenderSnapshot( final PixelRadianMap camera, final LinkedHashMap&lt;Storage, Color&gt; regions, final RenderOptions options, final double offset, final List&lt;Rectangle&gt; fills, final List&lt;ColoredRectangle&gt; coverRectangles, final List&lt;ColoredPolygon&gt; boundPolygons, final Storage oboStorage, final Color oboColor) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer#ColoredRectangle(Rectangle rectangle, Color color) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer#ColoredPolygon(ConvexPolygon polygon, Color color) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer#CommittedRaster( Image image, Image boundsImage, Image oboImage, PixelRadianMap camera, RenderOptions options, double offset, long generation) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer#drawHorizontalLine( final double y, final double x1, final double x2, final PixelWriter pixelWriter, final Color color, final PixelRadianMap renderMap) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer#drawVerticalLine( final double x, final double y1, final double y2, final PixelWriter pixelWriter, final Color color, final PixelRadianMap renderMap) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer#drawObliqueLine( final DoubleUnaryOperator y, final double x1, final double x2, final DoubleUnaryOperator x, final double y1, final double y2, final PixelWriter pixelWriter, final Color color, final PixelRadianMap renderMap) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer#renderGuideLines( final PixelRadianMap renderMap) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer#renderPolygon( final ConvexPolygon poly, final WritableImage image, final Color color, final PixelRadianMap renderMap) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer#renderRectLoad(final Rectangle rect, final WritableImage image, final Color colorInside, final Color colorBound, final RenderOptions options, final PixelRadianMap renderMap) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer#renderUnstable( final Storage.Unstable unstable, final PixelWriter pixelWriter, final Rectangle viewRectangle, final Color color, final RenderOptions options, final PixelRadianMap map, final double offset) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer#renderRegion( final Storage region, final WritableImage image, final Color color, final RenderOptions options, final PixelRadianMap map, final double offset) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer#varyLFunction(final MutableSortedSet&lt;ClassifiedCodeSequence&gt; codesFound, final MutableList&lt;Vector2&gt; points, final int[] maximums, final boolean overrideSS, final int max, final VarySearchRequest searchRequest, final ExecutorService executor2) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer#superPolyVaryFunction( final SuperPolyVaryRequest request, final OperationRegistry.OperationHandle operation, final ExecutorService executor) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer#autoPolyVaryFunction(final Tuple7&lt;ConvexPolygon, Integer, Integer, Integer, Integer, Integer, Integer&gt; polyVals, final Optional&lt;SimpleObjectProperty&lt;Integer&gt;&gt; step, final Optional&lt;Color&gt; colorOpt, final boolean overrideSS, final boolean autoCover, final boolean autoSmallCover, final VarySearchRequest searchRequest, final int subdivisions, final Tuple3&lt;Integer, Integer, Integer&gt; startStepEnd, final AutoPolyVaryOptions autoOptions, final OperationRegistry.OperationHandle operation, final ExecutorService executor ) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer#polyVaryFunction(final Tuple7&lt;ConvexPolygon, Integer, Integer, Integer, Integer, Integer, Integer&gt; polyVals, final Optional&lt;SimpleObjectProperty&lt;Integer&gt;&gt; step, final Optional&lt;Color&gt; colorOpt, final boolean overrideSS, final boolean autoCover, final VarySearchRequest searchRequest, final int subdivisions, final OperationRegistry.OperationHandle operation, final ExecutorService executor) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer#polyVaryFunction(final Tuple7&lt;ConvexPolygon, Integer, Integer, Integer, Integer, Integer, Integer&gt; polyVals, final Optional&lt;SimpleObjectProperty&lt;Integer&gt;&gt; step, final Optional&lt;Color&gt; colorOpt, final boolean overrideSS, final boolean autoCover, final boolean autoSmallCover, final VarySearchRequest searchRequest, final int subdivisions, final OperationRegistry.OperationHandle operation, final ExecutorService executor) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer#drawPolyVary(final MutableList&lt;Double&gt; points, final int[] max, final ConvexPolygon area, final Optional&lt;SimpleObjectProperty&lt;Integer&gt;&gt; step, final Optional&lt;Color&gt; colorOpt, final boolean overrideSS, final boolean autoCover, final boolean autoSmallCover, final VarySearchRequest searchRequest, final OperationRegistry.OperationHandle operation, final ExecutorService executor, final ExecutorService storageExecutor, final ExecutorService shotExecutor) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer.AutoPolyVaryRun#AutoPolyVaryRun(final int[] max, final boolean autoCover, final boolean autoSmallCover, final boolean overrideSS, final ProgressMultiTask progress, final Optional&lt;SimpleObjectProperty&lt;Integer&gt;&gt; step, final ExecutorService drawExecutor, final ExecutorService storageExecutor, final ExecutorService shotExecutor, final VarySearchRequest searchRequest, final AutoPolyVaryOptions autoOptions, final OperationRegistry.OperationHandle operation) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer#drawAutoPolyVary(final int[] max, final int maxSubdivisions, final boolean autoCover, final boolean autoSmallCover, final boolean overrideSS, final int currIdx, final int endIdx, final int stepIdx, final ConvexPolygon area, final ProgressMultiTask overallProgress, final Optional&lt;SimpleObjectProperty&lt;Integer&gt;&gt; step, final Optional&lt;Color&gt; colorOpt, final VarySearchRequest searchRequest, final AutoPolyVaryOptions autoOptions, final OperationRegistry.OperationHandle operation, final ExecutorService drawExecutor, final ExecutorService storageExecutor, final ExecutorService shotExecutor) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer#autoRecurse( final double xMin, final double xMax, final double yMin, final double yMax, final int depth, final int max, final ConvexPolygon area, final MutableList&lt;Double&gt; points, final CommittedRaster raster) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer#queuedVaryTask( final TetraBarRequest request, final int index, final ExecutorService outerExecutor, final ExecutorService shotExecutor, final ArrayList&lt;MutableSortedSet&lt;ClassifiedCodeSequence&gt;&gt; groupCodes, final OperationRegistry.OperationHandle operation) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer#moveScreen( final String xString, final String yString, final ExecutorService renderExecutor) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer#moveScreen( final double x, final double y, final ExecutorService renderExecutor) -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer#committedViewRectangle() -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Viewer.java:Viewer#isCommittedRasterTransparent( final double rx, final double ry) -->
+
+### 14.190 `nextIter` MRR compatibility, native-Vary cancellation, and runtime limits
+
+Author: Abdul
+
+Date: 2026-07-31
+
+The native MRR contract retains three meanings: `1` is nonempty, `0` is a
+certified empty region, and `-1` is a backend failure. Java does not reinterpret
+the third state as a candidate that may be skipped. PolyVary, VaryL, and
+CycleVary call `Database.loadStorage` directly: present Storage is published,
+empty remains `//empty set`, and a real failure reaches the task's failed path.
+The temporary `NativeMrrException`/`VaryStorageLoader` policy, skip counters,
+and aggregate success summaries were removed because the three `nextIter`
+candidates are expected MRR inputs.
+
+The regression came from promoting newer proof experiments into compatibility
+gates. Equal, nonzero endpoint signs caused `refine_line_segment` and
+`refine_polygon` to throw even when the established implementation continued
+refining. The subsequent connected-arc uniqueness gate could also reject a
+Newton root that the established production path accepted. Production now
+restores that path: it tries Newton on the full segment and both halves, keeps a
+root only when exact substitution makes both equations zero, and throws only
+when no seed yields such a validated common root. Krawczyk, connected-arc, and
+concealed-crossing helpers remain available to focused proof tests and future
+research, but no longer reject the established MRR corpus in production.
+
+Cancellation has two coordinated layers. `backend_cancel` publishes the native
+flag with release ordering, and VaryCS/Vary3/Vary4 poll with acquire ordering.
+Workers no longer reset that process-wide flag. `backend_reset_cancel` is
+called exactly once by the Java operation owner after it acquires the shared
+`native-vary` registry key. Every native-Vary workflow uses that key, preventing
+one workflow from clearing another workflow's cancellation while it retires.
+
+`Wrapper` also sets `NATIVE_VARY_CANCELLED` before entering JNA cancellation.
+That Java latch closes the queued-call hole: a thread interrupted while waiting
+for native admission exits as cancellation, and a waiter that acquires the lock
+after native work unwinds checks the latch before calling native code. Cancel
+buttons and window-manager close handlers both use
+`requestVaryCancellation`, so closing a progress dialog has the same backend
+effect as pressing Cancel. The next independently admitted native-Vary
+operation clears both layers through `beginNativeVaryOperation`.
+
+The Windows `jpackage` script now passes `-Xms2g`, `-Xmx6g`,
+`-XX:MaxDirectMemorySize=2g`, and `-Xss2m`, matching the Gradle application
+defaults. `Main.start` prints the runtime input arguments and maximum Java heap
+before opening the database chooser. This diagnostic cannot change a direct
+JAR's heap after launch; it makes missing launcher flags observable.
+
+Finally, `patternfinder.PatUtils.numThreads` aliases the value parsed by
+`billiards.viewer.Utils` before JavaFX launch. PatternFinder, Viewer pools, and
+native Boost/TBB work now share one requested value. The value bounds configured
+worker pools; it is not a promise of constant CPU occupancy, because dependent
+MRR certification and merge phases can remain sequential.
+
+<!-- handbook-entry:cpp:src/backend/cpp/wrapper.cpp:backend_reset_cancel() -->
+<!-- handbook-entry:cpp:src/backend/headers/intersection.hpp:intersection_legacy(const EquationGradient&lt;Symbols,T&gt; &amp; eq0,const EquationGradient&lt;Symbols,S&gt; &amp; eq1,const Vector2&lt;Real&gt; &amp; a,const Vector2&lt;Real&gt; &amp; b) -->
+<!-- handbook-entry:cpp:src/backend/headers/intersection.hpp:intersection_legacy#__anoncbdfd6cb0702(const Vector2&lt;Real&gt;&amp; x_trial)  -->
+<!-- handbook-entry:java:src/java/billiards/viewer/OperationRegistry.java:OperationRegistry#NATIVE_VARY_OPERATION_KEY -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Progress.java:Progress#windowSlotReturned -->
+<!-- handbook-entry:java:src/java/billiards/viewer/Progress.java:Progress#incrementWindowCount(final AtomicInteger count) -->
+<!-- handbook-entry:java:src/java/billiards/wrapper/Wrapper.java:Wrapper#NATIVE_VARY_CANCELLED -->
+<!-- handbook-entry:java:src/java/billiards/wrapper/Wrapper.java:Wrapper#backend_reset_cancel() -->
+<!-- handbook-entry:java:src/java/billiards/wrapper/Wrapper.java:Wrapper#beginNativeVaryOperation() -->
+<!-- handbook-entry:java:src/java/billiards/wrapper/Wrapper.java:Wrapper#requestVaryCancellation() -->
+<!-- handbook-entry:java:src/java/billiards/wrapper/Wrapper.java:Wrapper#isVaryCancellationRequested() -->
+
 ## 15. Source-level completion ledger
 
 ### 15.1 Honest baseline
@@ -31163,6 +31940,76 @@ compaction never turns into a fresh broad survey. A gate is finished only when
 its ledger entries are reviewed or explicitly grouped as trivial.
 
 ### 15.2 Existing prose landmarks
+
+Universal Ctags sometimes reports explicit function/template specializations
+with the same apparent qualified name and parameter signature. It also omits
+the specialization argument from several generated `Enum` scopes. The audit
+assigns a source-order ordinal suffix only within each such collision group
+(for example, `@1` and `@2`). This keeps every real inventory row distinct
+without making ordinary IDs line-number-dependent. The ledger and auditor
+both reject duplicate IDs.
+
+The entries below are marker aliases for those already explained
+specializations. Their source-order behavior remains in the owning symbolic
+math, differentiation, evaluator, database serialization, and dormant
+prototype sections.
+
+<!-- duplicate-specialization-entry-markers -->
+<!-- handbook-entry:cpp:src/backend/cpp/database/deserialize.cpp:database#deserialize(const std::string &amp; coeffs_str)@1 -->
+<!-- handbook-entry:cpp:src/backend/cpp/database/deserialize.cpp:database#deserialize(const std::string &amp; coeffs_str)@2 -->
+<!-- handbook-entry:cpp:src/backend/cpp/database/deserialize.cpp:database#deserialize(const std::string &amp; equations_str)@1 -->
+<!-- handbook-entry:cpp:src/backend/cpp/database/deserialize.cpp:database#deserialize(const std::string &amp; equations_str)@2 -->
+<!-- handbook-entry:cpp:src/backend/cpp/diff.cpp:diff(const LinComArrZ&lt;XYEta&gt; &amp; equation)@1 -->
+<!-- handbook-entry:cpp:src/backend/cpp/diff.cpp:diff(const LinComArrZ&lt;XYEta&gt; &amp; equation)@2 -->
+<!-- handbook-entry:cpp:src/backend/cpp/division.cpp:divide_x2m1_full(PolynomialZ&lt;ST&gt; remainder)@1 -->
+<!-- handbook-entry:cpp:src/backend/cpp/division.cpp:divide_x2m1_full(PolynomialZ&lt;ST&gt; remainder)@2 -->
+<!-- handbook-entry:cpp:src/backend/cpp/division.cpp:divide_x2m1_partial(PolynomialZ&lt;ST&gt; remainder)@1 -->
+<!-- handbook-entry:cpp:src/backend/cpp/division.cpp:divide_x2m1_partial(PolynomialZ&lt;ST&gt; remainder)@2 -->
+<!-- handbook-entry:cpp:src/backend/cpp/division.cpp:first_term_divides(const PolynomialZ&lt;ST&gt; &amp; poly)@1 -->
+<!-- handbook-entry:cpp:src/backend/cpp/division.cpp:first_term_divides(const PolynomialZ&lt;ST&gt; &amp; poly)@2 -->
+<!-- handbook-entry:cpp:src/backend/cpp/evaluator.cpp:eval_trig(mpfr_t term,const Coeff64 coeff,const mpq_t frac,const unsigned long quad,const mpfr_t half_pi_d,const mpfr_t half_pi_u)@1 -->
+<!-- handbook-entry:cpp:src/backend/cpp/evaluator.cpp:eval_trig(mpfr_t term,const Coeff64 coeff,const mpq_t frac,const unsigned long quad,const mpfr_t half_pi_d,const mpfr_t half_pi_u)@2 -->
+<!-- handbook-entry:cpp:src/backend/cpp/evaluator.cpp:eval_trig_helper(mpfr_t term,const Coeff64 coeff,const mpq_t frac,const mpfr_t half_pi_d,const mpfr_t half_pi_u)@1 -->
+<!-- handbook-entry:cpp:src/backend/cpp/evaluator.cpp:eval_trig_helper(mpfr_t term,const Coeff64 coeff,const mpq_t frac,const mpfr_t half_pi_d,const mpfr_t half_pi_u)@2 -->
+<!-- handbook-entry:cpp:src/backend/cpp/general.cpp:geometry#ConvexPolygon@1 -->
+<!-- handbook-entry:cpp:src/backend/cpp/general.cpp:geometry#ConvexPolygon@2 -->
+<!-- handbook-entry:cpp:src/backend/cpp/general.cpp:geometry#Rectangle@1 -->
+<!-- handbook-entry:cpp:src/backend/cpp/general.cpp:geometry#Rectangle@2 -->
+<!-- handbook-entry:cpp:src/backend/cpp/general.cpp:geometry#Segment@1 -->
+<!-- handbook-entry:cpp:src/backend/cpp/general.cpp:geometry#Segment@2 -->
+<!-- handbook-entry:cpp:src/backend/cpp/general.cpp:math#LinComArr@1 -->
+<!-- handbook-entry:cpp:src/backend/cpp/general.cpp:math#LinComArr@2 -->
+<!-- handbook-entry:cpp:src/backend/cpp/general.cpp:math#LinComArr@3 -->
+<!-- handbook-entry:cpp:src/backend/cpp/general.cpp:math#LinComMap@1 -->
+<!-- handbook-entry:cpp:src/backend/cpp/general.cpp:math#LinComMap@2 -->
+<!-- handbook-entry:cpp:src/backend/cpp/general.cpp:math#LinComVec@1 -->
+<!-- handbook-entry:cpp:src/backend/cpp/general.cpp:math#LinComVec@2 -->
+<!-- handbook-entry:cpp:src/backend/cpp/linear_derivative.cpp:in_terms_of(const LinComArrZ&lt;XY&gt; &amp; lin_com,const LinComArrZ&lt;XYEta&gt; &amp; constraint)@1 -->
+<!-- handbook-entry:cpp:src/backend/cpp/linear_derivative.cpp:in_terms_of(const LinComArrZ&lt;XY&gt; &amp; lin_com,const LinComArrZ&lt;XYEta&gt; &amp; constraint)@2 -->
+<!-- handbook-entry:cpp:src/backend/headers/bezier_interp.hpp:diff(const LinComArrR&lt;XYOne&gt; &amp; equation)@1 -->
+<!-- handbook-entry:cpp:src/backend/headers/bezier_interp.hpp:diff(const LinComArrR&lt;XYOne&gt; &amp; equation)@2 -->
+<!-- handbook-entry:cpp:src/backend/headers/linear_derivative.hpp:Eta#Type@1 -->
+<!-- handbook-entry:cpp:src/backend/headers/linear_derivative.hpp:Eta#Type@2 -->
+<!-- handbook-entry:cpp:src/backend/headers/linear_derivative.hpp:Eta@1 -->
+<!-- handbook-entry:cpp:src/backend/headers/linear_derivative.hpp:Eta@2 -->
+<!-- handbook-entry:cpp:src/backend/headers/linear_derivative.hpp:Eta@3 -->
+<!-- handbook-entry:cpp:src/backend/headers/math/symbols.hpp:Enum#size@1 -->
+<!-- handbook-entry:cpp:src/backend/headers/math/symbols.hpp:Enum#size@2 -->
+<!-- handbook-entry:cpp:src/backend/headers/math/symbols.hpp:Enum#size@3 -->
+<!-- handbook-entry:cpp:src/backend/headers/math/symbols.hpp:Enum#size@4 -->
+<!-- handbook-entry:cpp:src/backend/headers/math/symbols.hpp:Enum#size@5 -->
+<!-- handbook-entry:cpp:src/backend/headers/math/symbols.hpp:Enum#size@6 -->
+<!-- handbook-entry:cpp:src/backend/headers/math/symbols.hpp:Enum#size@7 -->
+<!-- handbook-entry:cpp:src/backend/headers/math/symbols.hpp:Enum#size@8 -->
+<!-- handbook-entry:cpp:src/backend/headers/math/symbols.hpp:Enum@1 -->
+<!-- handbook-entry:cpp:src/backend/headers/math/symbols.hpp:Enum@2 -->
+<!-- handbook-entry:cpp:src/backend/headers/math/symbols.hpp:Enum@3 -->
+<!-- handbook-entry:cpp:src/backend/headers/math/symbols.hpp:Enum@4 -->
+<!-- handbook-entry:cpp:src/backend/headers/math/symbols.hpp:Enum@5 -->
+<!-- handbook-entry:cpp:src/backend/headers/math/symbols.hpp:Enum@6 -->
+<!-- handbook-entry:cpp:src/backend/headers/math/symbols.hpp:Enum@7 -->
+<!-- handbook-entry:cpp:src/backend/headers/math/symbols.hpp:Enum@8 -->
+<!-- handbook-entry:cpp:src/backend/headers/math/symbols.hpp:Enum@9 -->
 
 <!-- symbol-summary:java:billiards.viewer.Main -->
 <!-- symbol-summary:java:billiards.viewer.Viewer -->

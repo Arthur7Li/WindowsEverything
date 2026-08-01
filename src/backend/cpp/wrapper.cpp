@@ -1489,7 +1489,8 @@ static std::string equation_stuff(const Equation<T> equation, float64_t x_value,
 
 }
 
-float64_t calculate_gradient(const char* const equation_cstr, float64_t x_value, float64_t y_value, bool from_database, CString* const cstring, CString* const cstring2) {
+// abdul 27/07/2026 [return the same int32 success/failure status that the Java JNA declaration reads]
+int32_t calculate_gradient(const char* const equation_cstr, float64_t x_value, float64_t y_value, bool from_database, CString* const cstring, CString* const cstring2) {
     try {
         std::string equation_str {equation_cstr};
         std::ostringstream oss {};
@@ -1614,7 +1615,28 @@ int vary_4_cpp(const int32_t int_movesMin, const int32_t int_movesMax, const flo
 
 }
 
-// cancel
-void backend_cancel()       { 
-    cancel_flag().store(true,  std::memory_order_relaxed);  
+/**
+ * @brief Latches cooperative cancellation for every native Vary call in the current exclusive operation.
+ * @return Nothing.
+ * @throws Nothing.
+ * @invariant Once set, the flag remains set until backend_reset_cancel starts a new admitted operation.
+ * @note The atomic flag is process-owned and no caller-owned memory is retained.
+ */
+// abdul 31/07/2026 [publish cancellation with release ordering so active and queued native traversals observe it]
+void backend_cancel() {
+    // Store the terminal state shared by all native traversal polling points.
+    cancel_flag().store(true, std::memory_order_release);
+}
+
+/**
+ * @brief Clears cooperative cancellation exactly once for a newly admitted exclusive Vary operation.
+ * @return Nothing.
+ * @throws Nothing.
+ * @invariant Java owns global Vary exclusivity before calling this function.
+ * @note The atomic flag is process-owned and no caller-owned memory is retained.
+ */
+// abdul 31/07/2026 [separate operation admission from individual calls so queued calls cannot undo Cancel]
+void backend_reset_cancel() {
+    // Publish the runnable state before the new operation submits native work.
+    cancel_flag().store(false, std::memory_order_release);
 }

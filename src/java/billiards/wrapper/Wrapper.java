@@ -17,6 +17,8 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.eclipse.collections.impl.factory.Lists;
 import org.eclipse.collections.api.list.MutableList;
@@ -39,12 +41,16 @@ public final class Wrapper {
 
     private static final ReentrantLock NATIVE_VARY_LOCK = new ReentrantLock(true);
     private static final ReentrantLock NATIVE_MRR_LOCK = new ReentrantLock(true);
+    // abdul 31/07/2026 [latch cancellation for the complete exclusive Vary operation so queued calls cannot restart native work]
+    private static final AtomicBoolean NATIVE_VARY_CANCELLED = new AtomicBoolean(false);
 
     private static native void sqlite_error_logging();
     private static native void database_create(final String dbPath);
     private static native void database_clear(final String dbPath);
     private static native Pointer backend_last_error();
     private static native void backend_set_worker_threads(final int workerCount);
+    private static native void backend_cancel();
+    private static native void backend_reset_cancel();
 
     public static void errorLogging() {
         sqlite_error_logging();
@@ -58,6 +64,22 @@ public final class Wrapper {
         throwIfBackendError("configure native worker threads");
     }
 
+    public static void beginNativeVaryOperation() {
+        // abdul 31/07/2026 [reset cancellation exactly once when the exclusive UI operation is admitted]
+        NATIVE_VARY_CANCELLED.set(false);
+        backend_reset_cancel();
+    }
+
+    public static void requestVaryCancellation() {
+        // abdul 31/07/2026 [publish Java cancellation before signalling C++ so waiting calls cannot enter after the active call exits]
+        NATIVE_VARY_CANCELLED.set(true);
+        backend_cancel();
+    }
+
+    static boolean isVaryCancellationRequested() {
+        return NATIVE_VARY_CANCELLED.get();
+    }
+
     private static void beginNativeVary(final String operationName) {
         // The C++ backend still uses one global cancel flag for VaryCS/Vary3/Vary4. Until that is replaced with a
         // per-operation token, only one native vary call may be inside the backend at a time. Use a fair lock instead
@@ -66,7 +88,15 @@ public final class Wrapper {
             NATIVE_VARY_LOCK.lockInterruptibly();
         } catch (final InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new IllegalStateException("Interrupted while waiting to start " + operationName, e);
+            // abdul 31/07/2026 [classify interruption at the native admission lock as normal cancellation]
+            throw new CancellationException(
+                    "Cancelled while waiting to start " + operationName);
+        }
+        if (NATIVE_VARY_CANCELLED.get()) {
+            // abdul 31/07/2026 [release admission immediately when this operation was cancelled while the caller waited]
+            NATIVE_VARY_LOCK.unlock();
+            throw new CancellationException(
+                    "Cancelled before starting " + operationName);
         }
     }
 
@@ -91,6 +121,7 @@ public final class Wrapper {
     }
 
     private static RuntimeException nativeMrrFailure(final String operation, final Object code) {
+        // abdul 31/07/2026 [propagate unexpected native MRR failures instead of allowing Vary to omit a candidate]
         return new RuntimeException(operation + " failed for " + code + ": " + backendLastError());
     }
 
@@ -143,8 +174,6 @@ public final class Wrapper {
             throw new RuntimeException("Failed to " + operation + ": " + message);
         }
     }
-
-    public static native void backend_cancel();
 
     private static native int cover_wrapper(String polygon, String codes, String unstables,
                                             int digits, int subdivide, int empty,

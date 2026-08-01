@@ -28,9 +28,12 @@ import org.eclipse.collections.api.list.primitive.ImmutableIntList;
 import java.sql.*;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 
 /**
  * Zhao Yu Li, Jun 12, 2025.
@@ -39,6 +42,8 @@ import java.util.concurrent.Executors;
  * class that gives access to its Stage, and implements the addToContent method.
  */
 public class CodeAndPatternLookupWindow {
+    private static final String LOOKUP_OPERATION_KEY =
+            "iterate-pattern-lookup";
     private static final int INITIAL_LOAD = 20;
     private static final int BATCH_SIZE = 5;
     private final ObservableList<CodeAndPattern> originalOrder = FXCollections.observableArrayList();
@@ -47,6 +52,8 @@ public class CodeAndPatternLookupWindow {
     private boolean isLoading = false;
     private int currentOffset = 0;
     private boolean scrollBarInitialized = false;
+    private final OperationRegistry operations;
+    private OperationRegistry.OperationHandle activeLookup;
 
     private final Stage stage = new Stage();
     TableView<CodeAndPattern> tableView = new TableView<>(sortedData);
@@ -165,7 +172,11 @@ public class CodeAndPatternLookupWindow {
         public String getType() { return type; }
     }
 
-    public CodeAndPatternLookupWindow(IterateToLimitWindow iterateToLimitWindow) {
+    public CodeAndPatternLookupWindow(
+            final IterateToLimitWindow iterateToLimitWindow,
+            final OperationRegistry operations) {
+        // abdul 27/07/2026 [register paged database lookups so closing Viewer cannot leave a query thread outside application shutdown]
+        this.operations = Objects.requireNonNull(operations, "operations");
         // Jun 12, 2025. DeepSeek, create columns with custom cell factory
         Callback<TableColumn<CodeAndPattern, String>, TableCell<CodeAndPattern, String>> cellFactory =
                 col -> new ScrollableTableCell<>();
@@ -231,6 +242,7 @@ public class CodeAndPatternLookupWindow {
 
         stage.initModality(Modality.NONE);
         stage.initOwner(iterateToLimitWindow.getStage());
+        stage.setOnHiding(event -> cancelActiveLookup());
     }
 
     private VBox getVBox(IterateToLimitWindow iterateToLimitWindow) {
@@ -255,39 +267,98 @@ public class CodeAndPatternLookupWindow {
      * @param limit The maximum number of entries to retrieve.
      * @param offset The number of entries to skip.
      */
+    // abdul 28/07/2026 [own each paged JDBC query, close every result resource, and guard its JavaFX publication]
     private void lookUpIterPat(int limit, int offset) {
+        final OperationRegistry.OperationHandle operation;
+        try {
+            operation = operations.openExclusive(
+                    "Iteration-pattern lookup", LOOKUP_OPERATION_KEY);
+        } catch (final RejectedExecutionException exception) {
+            showLookupFailure(exception);
+            return;
+        }
+
         isLoading = true;
-        final ExecutorService executor = Executors.newSingleThreadExecutor();
-        executor.execute(() -> {
-            final String selectPatternQuery = "SELECT code_sequence,iter_pattern FROM main.iteration_pattern ORDER BY last_used DESC LIMIT ? OFFSET ?;";
+        activeLookup = operation;
+        try {
+            final ExecutorService executor = operation.own(
+                    Executors.newSingleThreadExecutor());
+            operation.track(executor.submit(() -> {
+                final String selectPatternQuery =
+                        "SELECT code_sequence,iter_pattern FROM main.iteration_pattern ORDER BY last_used DESC LIMIT ? OFFSET ?;";
+                final List<CodeAndPattern> newCodesAndPatterns =
+                        new ArrayList<>();
 
-            String dbName = "garbage";
-            try (Connection conn = DriverManager.getConnection(Admin.getUrl(dbName));
-                 PreparedStatement stmt = conn.prepareStatement(selectPatternQuery)) {
-                stmt.setInt(1, limit);
-                stmt.setInt(2, offset);
+                try (Connection conn =
+                             DriverManager.getConnection(Admin.getUrl("garbage"));
+                     PreparedStatement stmt =
+                             conn.prepareStatement(selectPatternQuery)) {
+                    stmt.setInt(1, limit);
+                    stmt.setInt(2, offset);
 
-                ResultSet rs = stmt.executeQuery();
-
-                ObservableList<CodeAndPattern> newCodesAndPatterns = FXCollections.observableArrayList();
-
-                while (rs.next()) {
-                    newCodesAndPatterns.add(new CodeAndPattern(rs.getString(1), rs.getString(2)));
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        while (rs.next()) {
+                            newCodesAndPatterns.add(
+                                    new CodeAndPattern(
+                                            rs.getString(1), rs.getString(2)));
+                        }
+                    }
+                } catch (final SQLException exception) {
+                    operation.cancel();
+                    Platform.runLater(() -> {
+                        if (activeLookup == operation) {
+                            activeLookup = null;
+                            isLoading = false;
+                            showLookupFailure(exception);
+                        }
+                    });
+                    return;
                 }
 
-                // Update UI on JavaFX Application Thread
-                javafx.application.Platform.runLater(() -> {
+                Platform.runLater(() -> {
+                    if (activeLookup != operation
+                            || operation.isCancelled()) {
+                        return;
+                    }
                     data.addAll(newCodesAndPatterns);
                     currentOffset += newCodesAndPatterns.size();
+                    activeLookup = null;
                     isLoading = false;
+                    operation.complete();
                 });
-            } catch (SQLException e) {
-                javafx.application.Platform.runLater(() -> isLoading = false);
-                throw new RuntimeException(e);
-            }
+            }));
+        } catch (final RuntimeException exception) {
+            activeLookup = null;
+            isLoading = false;
+            operation.cancel();
+            showLookupFailure(exception);
+        }
+    }
 
-            executor.shutdown();
-        });
+    // abdul 28/07/2026 [make window close and application shutdown share one idempotent lookup cancellation path]
+    private void cancelActiveLookup() {
+        final OperationRegistry.OperationHandle operation = activeLookup;
+        activeLookup = null;
+        isLoading = false;
+        if (operation != null) {
+            operation.cancel();
+        }
+    }
+
+    private static void showLookupFailure(final Throwable failure) {
+        final Alert alert = new Alert(Alert.AlertType.ERROR);
+        alert.setTitle("Lookup Failed");
+        alert.setHeaderText("Could not load iteration patterns");
+        alert.setContentText(
+                failure.getMessage() == null
+                        ? failure.getClass().getSimpleName()
+                        : failure.getMessage());
+        alert.show();
+    }
+
+    public void close() {
+        cancelActiveLookup();
+        stage.close();
     }
 
     private ScrollBar getVerticalScrollbar(TableView<?> tableView) {

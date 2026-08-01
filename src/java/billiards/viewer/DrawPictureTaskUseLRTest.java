@@ -17,8 +17,6 @@ import java.util.concurrent.*;
 
 import javafx.concurrent.Task;
 
-import static billiards.viewer.Utils.verifyInfo;
-
 // This task is almost identical to the other one. Hmmm, is there some way
 // of dealing with that?
 //
@@ -75,28 +73,22 @@ public final class DrawPictureTaskUseLRTest extends Task<Array<Storage>> impleme
 
                 if (opt_infoAll.isPresent()){
                     InfoAll infoAll = opt_infoAll.get();
-                    boolean isLegal = Utils.verifyInfo(infoAll, storage);
-                    if (isLegal) {
+                    final ValidationStatus validation =
+                            Utils.verifyInfo(infoAll, storage);
+                    if (validation == ValidationStatus.VALID) {
 
                         long end = System.currentTimeMillis();
                         //System.out.println("LR success in " + Long.toString(end - start) + "ms " + classCodeSeq.toString());
 
                         return Either.right(opt.get());
                     }
-                    else {
+                    else if (validation == ValidationStatus.INVALID) {
+                        // abdul 27/07/2026 [delete reconstructed rows only after a typed invalidity proof]
                         //System.out.println("delete1"+classCodeSeq);
 
                         Wrapper.deleteFromDatabase(classCodeSeq, pool);
                     }
                 }
-                else {
-                    //System.out.println("delete2"+classCodeSeq);
-                    Wrapper.deleteFromDatabase(classCodeSeq, pool);
-                }
-            }
-            else {
-                //System.out.println("delete3"+classCodeSeq);
-                Wrapper.deleteFromDatabase(classCodeSeq, pool);
             }
 
             // slow way

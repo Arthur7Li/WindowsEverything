@@ -45,6 +45,8 @@ public final class ProgressWithStatus {
 
         stage.setScene(scene);
         stage.setOnCloseRequest(event -> {
+            // abdul 31/07/2026 [make progress-window close signal active and queued native Vary work]
+            Wrapper.requestVaryCancellation();
             requestCancel(task);
             stage.close();
         });
@@ -65,7 +67,8 @@ public final class ProgressWithStatus {
         
         cancelButton.setText("Cancel");
         cancelButton.setOnAction(event -> {
-            Wrapper.backend_cancel();
+            // abdul 31/07/2026 [latch native cancellation for every call owned by this task]
+            Wrapper.requestVaryCancellation();
             requestCancel(task);
             stage.close();
         });

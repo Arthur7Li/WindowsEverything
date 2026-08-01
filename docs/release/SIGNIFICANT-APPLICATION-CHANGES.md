@@ -1,7 +1,7 @@
 ---
 title: "Significant Changes to BilliardsEverything"
 subtitle: "Technical implementation report"
-date: "19 July 2026"
+date: "28 July 2026"
 ---
 
 # Purpose And Scope
@@ -27,6 +27,160 @@ were not copied as one undifferentiated patch. Some were incorporated directly,
 some were adapted to the existing concurrency and ownership model, and some
 were rejected because they violated an invariant or would have changed user
 data location. Section 2 gives the complete crosswalk.
+
+## 27 July 2026 Evidence-First Addendum
+
+The active fork now has focused regressions and repairs for four additional
+boundaries. Native gradient status uses the same `int32_t` ABI that Java JNA
+declares. Vary4 retains every value-returning vector difference and checks a
+candidate against the current descendant beam instead of its stale worker
+root. Restricted MRR curve generation appends duplicate equation-key witness
+vectors and sorts them identically at one, two, and four workers.
+
+Save V3 now treats the displayed typed/browsed path as authoritative, validates
+`1 <= count <= available` before filesystem mutation, snapshots the result
+list, writes UTF-8 through a same-directory staged replacement, and clears only
+the selected destination. New and existing destinations share one explicit
+prefix contract. The vector `falgo::transform` also reserves its exactly known
+output size while preserving empty and non-default-constructible results.
+
+The full persistence evidence, source-level contracts, test matrix, and
+remaining manual checks are recorded in
+`EVIDENCE-FIRST-REPAIRS-2026-07-27.md`.
+
+## 28 July 2026 Critical-Repair Addendum
+
+The active critical findings outside dormant Small Cover were rechecked,
+repaired, and exercised through clean Java/native gates. The exact
+implementation chronology, including failed intermediate proofs and the
+performance measurements, is retained in
+`CRITICAL-REPAIR-CHECKPOINT-2026-07-27.md`. The source-level contracts are in
+handbook Sections 14.182 through 14.189.
+
+### Native intersection compatibility and proof research
+
+The special-corner gradient path now dispatches `(0, pi/2)` and `(pi/2, 0)` to
+their matching exact identities. It derives a sufficient derivative search
+bound from stored frequencies, checks factorial/power-of-two normalization
+division exactly, and rejects the ambiguous origin.
+
+The source contains strict two-equation Krawczyk inclusion, connected-arc,
+straight-line substitution, and concealed-crossing helpers. Those experimental
+gates found real proof questions but also rejected established MRR inputs in
+`docs/nextIter.txt`. They remain available to focused tests and research; they
+are no longer production compatibility requirements.
+
+Production intersection again tries Newton on the complete segment and both
+half-segments. It accepts a candidate only after exact substitution makes both
+equations zero. The known-zero branch likewise restores its midpoint,
+central-quarter, and inward-fudge seed order. Refinement does not throw solely
+because two exact edge signs are equal and nonzero. This restores the
+established Abdul/Main result path while still failing when no validated common
+root can be obtained.
+
+Generalized sine and cosine cases may share dozens of symbolic terms between
+the boundary and tested curve. Because the boundary is exactly zero on the
+candidate arc, the certificate may evaluate `curve + boundary` or
+`curve - boundary` when that exact transformation reduces term count. The
+experimental proof conditions are unchanged. The term reduction remains
+useful for future certificate research without controlling production MRR
+acceptance.
+
+### Operation and publication ownership
+
+One application-owned `OperationRegistry` now provides generation IDs,
+exclusive workflow keys, Future/executor ownership, exactly-once terminal
+transition, late-publication rejection, and asynchronous shutdown/join.
+Terminal handles remain registered until every owned pool has actually
+stopped. Main-window close first stops admission and cancels/joins active
+Viewer work, then destroys the native pool and exits JavaFX.
+
+The audit covered Boyan Vary/Vary3B, Cover, CycleVary, lookup, Tetra/Bar,
+ordinary/Middle VaryL, direct/Auto/Super PolyVary, mixed code loading, cover
+merge, and rendering. Partial, success, recursion, render, and error-dialog
+callbacks check their generation again on JavaFX, so queued callbacks cannot
+publish after cancellation or shutdown.
+
+### Immutable requests and typed evidence
+
+Vary and automatic workflows capture JavaFX controls in immutable plain-value
+requests before worker admission. `VarySearchRequest` defensively copies all
+ten type flags. Tetra/Bar owns copied point groups and a private result
+accumulator. SuperPolyVary owns the complete schedule, mode, line range,
+search request, and publication choices. Its settings use a distinct
+versioned properties file with complete atomic replacement and correct legacy
+bounds/steps import.
+
+Reconstructed storage validation now consumes the populated native sine and
+cosine equation fields and returns `VALID`, `INVALID`, or `INCONCLUSIVE`.
+Only a concrete negative witness is destructive. Empty, malformed, boundary,
+or insufficient whole-hull evidence follows the slow verification path and
+cannot delete a database row.
+
+### Cover and render generations
+
+The Cover triple lane is structurally typed as exactly
+stable-unstable-stable. Singles and triples use private worker pools beneath
+one registered aggregate operation.
+
+Cover merge now writes a unique sibling staging directory, requires all seven
+regular artifacts, records SHA-256 and byte size in a manifest, moves the
+previous live directory to rollback, and only then switches staging into
+place. Failure restores the prior generation. Merge and metadata writers share
+one fair process-local lock.
+
+Rendering is split into JavaFX snapshot, background construction, and
+generation-checked commit. The snapshot contains the copied camera, ordered
+geometry/colors, options, offset, fills, cover/bound data, and OBO state.
+Hole-finding and PolyVary sampling consume a committed image/camera pair;
+they never reinterpret old pixels through a newly mutated camera.
+
+### Updater disposition
+
+Automatic updating is disabled because the prior downloader had no
+repository-backed signature, artifact binding, transactional installer, or
+rollback protocol. The Java updater plus root/app Windows and shell scripts
+were deleted. The disabled button directs users to manual trusted
+installation. The Windows and macOS packagers no longer copy the deleted
+scripts. Reintroducing automatic update is a new security feature, not a
+restoration task.
+
+### Validation and measured cost
+
+The initial clean fast gate rebuilt Java and native code, passed 28 JUnit
+tests, and passed the then-current 44 native cases. The subsequent
+intersection regressions increased the native suite to 47. The final clean
+gate rebuilt again and passed all 28 Java plus 47 native cases in 2 minutes 47
+seconds. The slow gate passed those 47 cases and completed the exact long CS
+calculation at one and four workers with identical complete boundaries in 29
+seconds.
+
+An independent exact-HEAD build reproduced historical hash
+`883e8b0c1317184e`. The experimental strict-certificate build produced
+`9f837d3bd0c612a7`; that historical measurement is retained but the stricter
+path is no longer the production compatibility path.
+
+All 15 measured benchmark samples produced that repaired hash:
+
+| Workers | Median wall | Range | Change from historical median |
+| ---: | ---: | ---: | ---: |
+| 1 | 12,644.050 ms | 12,564.390-12,776.184 ms | +27.8% |
+| 2 | 10,573.877 ms | 10,472.016-10,627.669 ms | +74.7% |
+| 4 | 9,476.218 ms | 9,408.298-9,488.579 ms | +118.2% |
+
+This is a real sequential proof cost and is tracked as `OPT-027`; it is not
+presented as a speed improvement. Future work may reuse substitutions,
+derivatives, enclosures, or certified arc partitions only while preserving
+the exact repaired payload and every hidden-crossing rejection.
+
+The retained report, metadata, summaries, and per-run streams are under
+`build/benchmarks/20260728-052151-reported-long-cs-mrr-baseline-unverified-skip-build/`.
+The final clean gate removed the earlier ignored raw directory, so this
+post-gate regeneration is the authoritative raw matrix.
+
+`BUG-166` and `BUG-168` remain open by explicit scope decision because they
+belong to dormant Small Cover. They were not relabeled as fixed or implicitly
+activated.
 
 # 1. Execution Pipelines Affected By The Changes
 
@@ -1384,6 +1538,13 @@ their contracts executable.
   for every short test run.
 - Native fixtures fail when their input files are missing or empty instead of
   passing after running zero examples.
+- Gradient fixtures verify both asymmetric special corners and exact
+  normalization behavior.
+- Intersection fixtures prove a Krawczyk common root, reject disjoint
+  equation-zero ranges and a different nonlinear branch, reject a straight
+  edge hiding two roots, accept a unique root whose derivative vanishes only
+  at a non-root endpoint, and retain the reported long Sin/Sin and Cos/Cos
+  generalized edges.
 
 ## Java Cases
 
@@ -1393,6 +1554,16 @@ their contracts executable.
   cannot run until render completion invokes it.
 - Window tests verify both a missing finish observer and an initialized finish
   observer.
+- Registry tests cover exclusive overlap, terminal-but-not-yet-stopped pool
+  retention, application shutdown cancellation/join, and stopped admission.
+- Cover tests cover strict triple roles, failed-merge preservation, successful
+  staged switch/rollback retention, and shared writer locking.
+- Reconstructed-storage tests distinguish positive whole-hull proof, a
+  negative witness, and empty/malformed/boundary inconclusive evidence.
+- Render scanner tests prove camera/raster pairing, pixel-bound checks,
+  committed extent counting, and pending-generation mutation rejection.
+- Super settings tests cover complete schema round-trip and separate legacy
+  bounds/step import.
 
 ## Correctness-First Timing Workloads
 
@@ -1414,6 +1585,30 @@ Principal files:
 - `src/test/resources/empty_codes_to_15.txt`
 - `src/test/resources/nonempty_codes_to_15.txt`
 - `tools/benchmark/`
+
+## `nextIter` MRR Compatibility and Cancellation
+
+Author: Abdul
+
+Date: 2026-07-31
+
+The temporary candidate-skip policy was removed. Native status `-1` remains a
+real failure, distinct from a certified empty Optional, and Java search tasks
+do not relabel it as successful skipped work. The three exact reported
+`nextIter` candidates now complete native MRR calculation under the restored
+intersection/refinement compatibility path.
+
+Native Vary cancellation is latched for the whole operation. Workers only poll
+the native flag; the Java owner resets it once after acquiring the shared
+`native-vary` operation key. A Java atomic latch prevents calls queued behind
+the admission lock from entering native code after cancellation. Progress
+Cancel buttons and window-close handlers both signal this same path.
+
+The Windows package now carries the same 2 GiB initial heap, 6 GiB maximum
+heap, 2 GiB direct-memory cap, and 2 MiB stack settings as Gradle run. Startup
+prints actual JVM inputs and maximum heap. PatternFinder now uses the same
+configured worker count as Viewer and the Boost/TBB backend instead of all
+available processors.
 
 # 16. Significant File Map
 
@@ -1458,8 +1653,15 @@ Important remaining limits include:
   a complete no-exception-across-JNA audit;
 - evaluator reuse reduces allocation churn, but native memory behavior should
   still be measured over repeated large cover and OSNO sessions;
-- one or two timing samples are diagnostic smoke runs, not a general performance
-  claim.
+- the stricter intersection certificate is deterministic but currently scales
+  poorly across workers on the reported long workload; `OPT-027` requires
+  profiling and proof-equivalent optimization rather than a relaxed test;
+- Small Cover remains dormant by explicit user direction, so `BUG-166` and
+  `BUG-168` remain open and its multi-region/All artifact paths must not be
+  treated as release-ready; and
+- manual JavaFX interruption, reopen/edit, close-during-work, staged cover
+  merge, and camera mutation runs remain valuable despite the focused
+  lifecycle tests.
 
 The most important design rule established by these changes is that concurrency
 must follow the full state model. Independent curve generation, vertex

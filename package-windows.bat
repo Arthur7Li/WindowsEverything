@@ -38,14 +38,14 @@ echo [INFO] Creating custom Java runtime with jlink...
   --no-header-files ^
   --no-man-pages
 
-rem === Step 5: Copy updater.bat and libbackend.dll ===
-echo [INFO] Copying updater.bat to input directory...
-copy /y "updater.bat" "%INPUT_DIR%"
+rem === Step 5: Copy libbackend.dll ===
+rem abdul 28/07/2026 [omit the deleted unauthenticated updater from packaged application inputs]
 echo [INFO] Copying libbackend.dll to input/backend/shared...
 mkdir "%INPUT_DIR%\backend\shared"
 copy /y "%BUILD_DIR%\libs\backend\shared\libbackend.dll" "%INPUT_DIR%\backend\shared\"
 
 rem === Step 6: Package with jpackage ===
+rem abdul 31/07/2026 [give the installed Windows launcher the same documented JVM memory defaults as Gradle run]
 echo [INFO] Running jpackage...
 "%JAVA_HOME%\bin\jpackage" ^
   --type msi ^
@@ -58,6 +58,12 @@ echo [INFO] Running jpackage...
   --icon "%ICON_PATH%" ^
   --win-menu ^
   --win-dir-chooser ^
+  --java-options "-server" ^
+  --java-options "-Xss2m" ^
+  --java-options "-Xms2g" ^
+  --java-options "-Xmx6g" ^
+  --java-options "-XX:MaxDirectMemorySize=2g" ^
+  --java-options "-XX:+UnlockDiagnosticVMOptions" ^
   --java-options "-Djna.library.path=\$APPDIR/backend/shared" ^
   --java-options "--add-modules=javafx.controls,javafx.fxml,java.sql" ^
   --app-version 2.1

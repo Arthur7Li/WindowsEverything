@@ -15,7 +15,8 @@ import billiards.wrapper.Wrapper;
 
 public class PatUtils {
 
-    public static final int numThreads = Runtime.getRuntime().availableProcessors();
+    // abdul 31/07/2026 [make PatternFinder obey the same user-selected worker budget as Viewer and the native backend]
+    public static final int numThreads = Utils.numThreads;
 
     public static String trimCodeLine(String line) {
 
