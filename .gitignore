@@ -35,7 +35,7 @@ stablecoverpats.txt
 triplecoverpats.txt
 full_project_context.txt
 garbage.txt
-
+/docs/nextIter.txt
 # Crash/profiling dumps
 *.log
 hs_err_pid*.log
