@@ -12,7 +12,7 @@ def platform = org.gradle.internal.os.OperatingSystem.current().isMacOsX() ? 'ma
 def isLinux = org.gradle.internal.os.OperatingSystem.current().isLinux()
 def isMac = currentOs.isMacOsX()
 def isWindows = currentOs.isWindows()
-def javafxVersion = '21.0.1'
+def javafxVersion = '23.0.1'
 def defaultMsys2Root = (System.getenv('MSYS2_ROOT') ?: 'C:/msys64').replace('\\', '/')
 ext.msys2NativePrefix = (
         System.getenv('BILLIARDS_MSYS2_PREFIX')
@@ -51,7 +51,9 @@ def billiardsNativeDebug = booleanPropertyOrEnv('billiardsNativeDebug', 'BILLIAR
 def billiardsNativeCpuTuned = booleanPropertyOrEnv('billiardsNativeCpuTuned', 'BILLIARDS_NATIVE_CPU_TUNED', false)
 def billiardsNativeLto = booleanPropertyOrEnv('billiardsNativeLto', 'BILLIARDS_NATIVE_LTO', false)
 
-mainClassName = 'billiards.viewer.Main'
+application {
+    mainClass = 'billiards.viewer.Main'
+}
 
 repositories {
     mavenCentral()
@@ -78,6 +80,7 @@ dependencies {
     implementation 'org.fxmisc.richtext:richtextfx:0.10.4'
     testImplementation 'org.junit.jupiter:junit-jupiter-api:5.2.0'
     testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.2.0'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.2.0'
 }
 
 test {
@@ -111,7 +114,7 @@ compileJava {
 }
 
 jar {
-    archivesBaseName = 'billiard-viewer'
+    archiveBaseName = 'billiard-viewer'
     if (System.getProperty('os.name').toLowerCase().contains('linux')) {
         dependsOn "backendSharedLibrary"
 
@@ -141,21 +144,25 @@ sourceSets {
     }
 }
 
-applicationDefaultJvmArgs = ['-server',
+application.applicationDefaultJvmArgs = ['-server',
                             "-Djna.library.path=${projectDir}/build/libs/backend/shared",
                             //'-Xss1000m',
                             '-Xss2m',
                             "-Xms${billiardsAppXms}",
                             "-Xmx${billiardsAppXmx}",
                             "-XX:MaxDirectMemorySize=${billiardsDirectMemory}",
-                            '-XX:+UnlockDiagnosticVMOptions']
+                            '-XX:+UnlockDiagnosticVMOptions',
+                            '--enable-native-access=ALL-UNNAMED,javafx.graphics'] // Required for JNA and JavaFX in Java 22+
 
 if (billiardsShowVmSettings) {
-    applicationDefaultJvmArgs += ['-XX:NativeMemoryTracking=summary', '-XshowSettings:vm']
+    application.applicationDefaultJvmArgs += ['-XX:NativeMemoryTracking=summary', '-XshowSettings:vm']
 }
 
-sourceCompatibility = JavaVersion.VERSION_17
-targetCompatibility = JavaVersion.VERSION_17
+// Upgraded to Java 26 compatibility
+java {
+    sourceCompatibility = JavaVersion.VERSION_26
+    targetCompatibility = JavaVersion.VERSION_26
+}
 
 model {
 
@@ -332,6 +339,8 @@ run.doFirst {
     def backendSharedDir = "$projectDir/build/libs/backend/shared"
     environment 'JNA_LIBRARY_PATH', backendSharedDir
     
+    jvmArgs += ['--enable-native-access=ALL-UNNAMED'] // Required for JNA in Java 22+
+
     if (isMac) {
         environment 'DYLD_LIBRARY_PATH', backendSharedDir
         jvmArgs += [

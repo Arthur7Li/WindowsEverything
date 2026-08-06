@@ -1,0 +1,17 @@
+// 7 24.5
+// 8 23.5
+// 8 24
+// 7 25
+// The following stables colored squares:
+// The following triples colored squares:
+// 1 squares were not filled in
+// 45 45
+// 0 stable squares used in the cover
+// 0 triple squares used in the cover
+// 0 stables used in the cover
+// 0 triples used in the cover
+// MRR at 23 decimals, deepest magnification 0
+// Total stable cost: 0
+// 1 squares were not filled in
+// Not Covered
+// Time elapsed: 0.109s
