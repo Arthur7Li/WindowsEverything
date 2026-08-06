@@ -31,9 +31,11 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.function.Consumer;
 import java.util.function.Function;
 
+import javafx.animation.AnimationTimer;
 import javafx.beans.property.SimpleObjectProperty;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
+import javafx.scene.Cursor;
 import javafx.scene.Scene;
 import javafx.scene.control.Alert.AlertType;//added oct 15,2017 george
 import javafx.scene.layout.HBox;
@@ -90,6 +92,12 @@ public final class CoverWindow {
     // private final CheckBox squaresCheckBox = new CheckBox("Squares");
     private final CheckBox addToSmallCoverCB = new CheckBox("Add to Small Cover");
 
+    private final ProgressBar progressBar = new ProgressBar(0);
+    private final Label progressLabel = new Label("");
+    private final HBox progressHBox = new HBox();
+    private AnimationTimer coverTimer;
+    private long coverStartTimeMs;
+
     private final Stage stage = new Stage();
     private final Scene scene = new Scene(base);
 
@@ -98,6 +106,11 @@ public final class CoverWindow {
         final OperationRegistry.OperationHandle operation =
                 activeCoverOperation;
         activeCoverOperation = null;
+        if (coverTimer != null) {
+            coverTimer.stop();
+            coverTimer = null;
+        }
+        scene.setCursor(Cursor.DEFAULT);
         if (operation != null) {
             // abdul 31/07/2026 [route cover-window cancellation through the shared Java/native cancellation latch]
             Wrapper.requestVaryCancellation();
@@ -136,35 +149,84 @@ public final class CoverWindow {
 
         activeCoverOperation = operation;
         calcBtn.setDisable(true);
+
+        // Start live Phase 1 calculation timer & UI progress feedback
+        coverStartTimeMs = System.currentTimeMillis();
+        progressBar.setVisible(true);
+        progressBar.setProgress(ProgressIndicator.INDETERMINATE_PROGRESS);
+        scene.setCursor(Cursor.WAIT);
+
+        if (coverTimer != null) {
+            coverTimer.stop();
+        }
+        coverTimer = new AnimationTimer() {
+            @Override
+            public void handle(final long now) {
+                final double elapsedSec = (System.currentTimeMillis() - coverStartTimeMs) / 1000.0;
+                progressLabel.setText(String.format("Phase 1/2: Calculating cover in native engine... (%.1fs)", elapsedSec));
+            }
+        };
+        coverTimer.start();
+
         task.setOnSucceeded(event -> {
             activeCoverOperation = null;
+            if (coverTimer != null) {
+                coverTimer.stop();
+                coverTimer = null;
+            }
             if (!operation.permitsPublication()) {
                 calcBtn.setDisable(false);
+                scene.setCursor(Cursor.DEFAULT);
+                progressBar.setVisible(false);
+                progressLabel.setText("");
                 return;
             }
             try {
+                progressLabel.setText("Phase 2/2: Painting cover shapes onto viewer...");
+                progressBar.setProgress(0.6);
                 // abdul 28/07/2026 [never load or publish a Cover generation after application/window cancellation]
                 publishResult.accept(task.getValue());
                 operation.complete();
+                final double totalElapsedSec = (System.currentTimeMillis() - coverStartTimeMs) / 1000.0;
+                progressBar.setProgress(1.0);
+                progressLabel.setText(String.format("Completed in %.2fs!", totalElapsedSec));
+                System.out.printf("Total True Time elapsed (including UI drawing): %.3fs%n", totalElapsedSec);
             } catch (final RuntimeException exception) {
                 operation.cancel();
                 showCoverFailure(title, exception);
+                progressLabel.setText("Cover calculation failed");
+                progressBar.setProgress(0.0);
             } finally {
                 calcBtn.setDisable(false);
+                scene.setCursor(Cursor.DEFAULT);
             }
         });
         task.setOnCancelled(event -> {
             activeCoverOperation = null;
+            if (coverTimer != null) {
+                coverTimer.stop();
+                coverTimer = null;
+            }
             operation.cancel();
             calcBtn.setDisable(false);
+            scene.setCursor(Cursor.DEFAULT);
+            progressBar.setProgress(0.0);
+            progressLabel.setText("Cancelled");
             System.out.println("// " + title + " cancelled");
         });
         task.setOnFailed(event -> {
             activeCoverOperation = null;
+            if (coverTimer != null) {
+                coverTimer.stop();
+                coverTimer = null;
+            }
             final boolean reportFailure =
                     operation.permitsPublication();
             operation.cancel();
             calcBtn.setDisable(false);
+            scene.setCursor(Cursor.DEFAULT);
+            progressBar.setProgress(0.0);
+            progressLabel.setText("Failed");
             if (reportFailure) {
                 showCoverFailure(title, task.getException());
             }
@@ -178,8 +240,15 @@ public final class CoverWindow {
             operation.track(executor.submit(task));
         } catch (final RuntimeException exception) {
             activeCoverOperation = null;
+            if (coverTimer != null) {
+                coverTimer.stop();
+                coverTimer = null;
+            }
             operation.cancel();
             calcBtn.setDisable(false);
+            scene.setCursor(Cursor.DEFAULT);
+            progressBar.setProgress(0.0);
+            progressLabel.setText("Failed to submit task");
             showCoverFailure(title, exception);
         }
     }
@@ -396,6 +465,7 @@ public final class CoverWindow {
         topText.setText(polygonString);
 
         bottomText.setPromptText("stables");
+
         bottomText.setPrefColumnCount(60);
         bottomText.setPrefRowCount(10);
         bottomText.setWrapText(true);
@@ -413,18 +483,14 @@ public final class CoverWindow {
         triplesText.setFocusTraversable(false);
         triplesText.setText(triplesString);
 
-/*
-        halfTriplesText.setPromptText("half the triples");
-        halfTriplesText.setPrefColumnCount(60);
-        halfTriplesText.setPrefRowCount(10);
-        halfTriplesText.setWrapText(true);
-        halfTriplesText.setEditable(true);
-        halfTriplesText.setFont(Font.font("Monaco", 16));
-        halfTriplesText.setFocusTraversable(false);
-        halfTriplesText.setText(halfTripleString);
-*/
-        //base.getChildren().addAll(topText, bottomText, triplesText,halfTriplesText, inputHBox);
-        base.getChildren().addAll(topText, bottomText, triplesText, inputHBox);
+        progressHBox.getChildren().addAll(progressBar, progressLabel);
+        progressHBox.setSpacing(10);
+        progressHBox.setAlignment(Pos.CENTER_LEFT);
+        progressBar.setPrefWidth(220);
+        progressBar.setVisible(false);
+        progressLabel.setFont(Font.font("Monaco", 13));
+
+        base.getChildren().addAll(topText, bottomText, triplesText, inputHBox, progressHBox);
         base.setSpacing(10);
         base.setPadding(new Insets(10));
     }
