@@ -153,8 +153,8 @@ static std::set<LinComArrZ<XYEta>> eliminate_phi(const std::set<LinComArrZ<XYEta
 
         boost::asio::post(pool, [begin, end, t, &pos_vec, &negative_phi, &thread_zero_phi, MAX_BUFFER_SIZE] {
             
-            std::vector<LinComArrZ<XYEta>> local_buffer;
-            local_buffer.reserve(MAX_BUFFER_SIZE);
+            // arthur 06/08/2026 [replaced vector with set to avoid O(N log N) sorts when buffer is mostly unique, enforced memory ceiling]
+            std::set<LinComArrZ<XYEta>> local_buffer;
 
             for (std::size_t i = begin; i < end; ++i) {
                 auto& positive_equation = pos_vec[i];
@@ -165,23 +165,16 @@ static std::set<LinComArrZ<XYEta>> eliminate_phi(const std::set<LinComArrZ<XYEta
                     auto no_phi = remove_phi(zero_equation);
                     no_phi.divide_content();
                     
-                    local_buffer.push_back(no_phi);
+                    local_buffer.insert(no_phi);
 
-                    // Safety valve: clean up buffer when it gets too large
-                    if (local_buffer.size() >= MAX_BUFFER_SIZE) {
-                        std::sort(local_buffer.begin(), local_buffer.end());
-                        auto last = std::unique(local_buffer.begin(), local_buffer.end());
-                        local_buffer.erase(last, local_buffer.end());
+                    // Safety valve: throw if Cartesian product exceeds memory ceiling
+                    if (local_buffer.size() > MAX_BUFFER_SIZE) {
+                        throw std::runtime_error("Cartesian product exceeds memory ceiling");
                     }
                 }
             }
 
-            // Final clean up of remaining items in the buffer
-            std::sort(local_buffer.begin(), local_buffer.end());
-            auto last = std::unique(local_buffer.begin(), local_buffer.end());
-            local_buffer.erase(last, local_buffer.end());
-
-            thread_zero_phi[t] = std::move(local_buffer);
+            thread_zero_phi[t] = std::vector<LinComArrZ<XYEta>>(local_buffer.begin(), local_buffer.end());
         });
     }
 

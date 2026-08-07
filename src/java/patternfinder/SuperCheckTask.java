@@ -140,6 +140,11 @@ public final class SuperCheckTask extends Task<String>{
             Utils.safeShutdownExecutor(executor, 30, java.util.concurrent.TimeUnit.SECONDS);
         }
 
+        // arthur 06/08/2026 [rethrow verification exception to fail task and avoid silent data loss]
+        if (except.isPresent()) {
+            throw new RuntimeException("SuperCheckTask encountered an execution error", except.get().getCause());
+        }
+
         Utils.writeToFile(Viewer.tmpDir + "/superFails.txt", antiResult.toString());
 
 		return result.toString();

@@ -120,14 +120,8 @@ static IntervalPolygon convert_to_interval(const RationalPolygon& rat_polygon) {
 // TODO give all of these more consistent names
 // TODO also do the refinement as the curves are generated
 // that should reduce the memory usage
-static boost::optional<IntervalPolygon> calculate_final_polygon(const std::vector<CodeNumber>& code_numbers, const std::vector<XYZ>& code_angles, const CurvesLR& curves) {
-    const auto rational_polygon = calculate_bounding_polygon(code_numbers, code_angles);
-
-    if (!rational_polygon) {
-        return boost::none;
-    }
-
-    auto interval_polygon = convert_to_interval(*rational_polygon);
+static boost::optional<IntervalPolygon> calculate_final_polygon(const RationalPolygon& rational_polygon, const CurvesLR& curves) {
+    auto interval_polygon = convert_to_interval(rational_polygon);
  
  //george aug 26,2019 this starts with a bounding polygon
  //   print_region(interval_polygon);
@@ -162,20 +156,8 @@ static boost::optional<IntervalPolygon> calculate_final_polygon(const std::vecto
     return interval_polygon;
 }
 
-static boost::optional<IntervalLineSegment> calculate_final_line_segment(const std::vector<CodeNumber>& code_numbers, const std::vector<XYZ>& code_angles, const LinComArrZ<XYEta>& constraint, const CurvesLR& curves) {
-
-    const auto rational_line_segment = calculate_bounding_line_segment(code_numbers, code_angles, constraint);
-
-    if (!rational_line_segment) {
-        return boost::none;
-    }
-    //std::cout << "bounding line"  << std::endl;
-
-    //std::cout << rational_line_segment->point0 << "->" << rational_line_segment->point1 << std::endl;//XIU
-
-
-
-    auto interval_line_segment = convert_to_interval(*rational_line_segment);
+static boost::optional<IntervalLineSegment> calculate_final_line_segment(const RationalLineSegment& rational_line_segment, const LinComArrZ<XYEta>& constraint, const CurvesLR& curves) {
+    auto interval_line_segment = convert_to_interval(rational_line_segment);
     //std::cout << interval_line_segment.point0 << "->" << interval_line_segment.point1 << std::endl;
 
     const EquationGradient<XY, LinComArrZ<XYEta>> constraint_grad{constraint};
@@ -260,9 +242,9 @@ static void convex_counterexample_checker(const IntervalPolygon& polygon) {
     }
 }
 //
-static boost::optional<Stable> points_and_stuff_stable(const std::vector<CodeNumber>& code_numbers, const std::vector<XYZ>& code_angles, const CurvesLR& curves) {
+static boost::optional<Stable> points_and_stuff_stable(const std::vector<CodeNumber>& code_numbers, const std::vector<XYZ>& code_angles, const RationalPolygon& rational_polygon, const CurvesLR& curves) {
 
-    const auto polygon = calculate_final_polygon(code_numbers, code_angles, curves);
+    const auto polygon = calculate_final_polygon(rational_polygon, curves);
 
     if (!polygon) {
         return boost::none;
@@ -290,9 +272,9 @@ static boost::optional<Stable> points_and_stuff_stable(const std::vector<CodeNum
     return Stable{initial_angles, rearranged_points, rearranged_equations, left_rights};
 }
 
-static boost::optional<Unstable> points_and_stuff_unstable(const std::vector<CodeNumber>& code_numbers, const std::vector<XYZ>& code_angles, const LinComArrZ<XYEta>& constraint, const CurvesLR& curves) {
+static boost::optional<Unstable> points_and_stuff_unstable(const std::vector<CodeNumber>& code_numbers, const std::vector<XYZ>& code_angles, const RationalLineSegment& rational_line_segment, const LinComArrZ<XYEta>& constraint, const CurvesLR& curves) {
 
-    const auto line_segment = calculate_final_line_segment(code_numbers, code_angles, constraint, curves);
+    const auto line_segment = calculate_final_line_segment(rational_line_segment, constraint, curves);
 
     if (!line_segment) {
         return boost::none;
@@ -339,9 +321,11 @@ boost::optional<Stable> calculate_stable(const CodeSequence& code_sequence, cons
     const auto code_angles_eta = falgo::transform(code_angles, xyz_to_xyeta);
     const auto code_angles_pi = falgo::transform(code_angles, xyz_to_xypi);
 
-    // Note: it is possible that we could calculate the bounding polygon first to
-    // check if it is empty. This way, we can return an empty optional without
-    // finding the unfolding
+    // arthur 06/08/2026 [early bounding rejection: avoid heavy Unfolding generation if mathematically empty]
+    const auto rational_polygon = calculate_bounding_polygon(code_numbers, code_angles);
+    if (!rational_polygon) {
+        return boost::none;
+    }
 
     const Unfolding unfold{code_numbers, code_angles};
 
@@ -374,7 +358,7 @@ boost::optional<Stable> calculate_stable(const CodeSequence& code_sequence, cons
         throw std::runtime_error("unstable code type passed to stable case");
     }
 
-    return points_and_stuff_stable(code_numbers, code_angles, curves);
+    return points_and_stuff_stable(code_numbers, code_angles, *rational_polygon, curves);
 }
 
 boost::optional<Unstable> calculate_unstable(const CodeSequence& code_sequence, const CodeType code_type) {
@@ -387,9 +371,11 @@ boost::optional<Unstable> calculate_unstable(const CodeSequence& code_sequence, 
     const auto code_angles_eta = falgo::transform(code_angles, xyz_to_xyeta);
     const auto code_angles_pi = falgo::transform(code_angles, xyz_to_xypi);
 
-    // Note: it is possible that we could calculate the bounding polygon first to
-    // check if it is empty. This way, we can return an empty optional without
-    // finding the unfolding
+    // arthur 06/08/2026 [early bounding rejection: avoid heavy Unfolding generation if mathematically empty]
+    const auto rational_line_segment = calculate_bounding_line_segment(code_numbers, code_angles, constraint);
+    if (!rational_line_segment) {
+        return boost::none;
+    }
 
     const Unfolding unfold{code_numbers, code_angles};
 
@@ -415,7 +401,7 @@ boost::optional<Unstable> calculate_unstable(const CodeSequence& code_sequence, 
     }
 
 
-    return points_and_stuff_unstable(code_numbers, code_angles, constraint, curves);
+    return points_and_stuff_unstable(code_numbers, code_angles, *rational_line_segment, constraint, curves);
 }
 
 boost::optional<Stable> calculate_stable(const CodeSequence& code_sequence, const CodeType code_type, const std::vector<LeftRight>& left_rights) {
@@ -426,9 +412,11 @@ boost::optional<Stable> calculate_stable(const CodeSequence& code_sequence, cons
     const auto code_angles_eta = falgo::transform(code_angles, xyz_to_xyeta);
     const auto code_angles_pi = falgo::transform(code_angles, xyz_to_xypi);
 
-    // Note: it is possible that we could calculate the bounding polygon first to
-    // check if it is empty. This way, we can return an empty optional without
-    // finding the unfolding
+    // arthur 06/08/2026 [early bounding rejection: avoid heavy Unfolding generation if mathematically empty]
+    const auto rational_polygon = calculate_bounding_polygon(code_numbers, code_angles);
+    if (!rational_polygon) {
+        return boost::none;
+    }
 
     const Unfolding unfold{code_numbers, code_angles};
 
@@ -459,7 +447,7 @@ boost::optional<Stable> calculate_stable(const CodeSequence& code_sequence, cons
     } else {
         throw std::runtime_error("unstable code type passed to stable case");
     }
-    auto result = points_and_stuff_stable(code_numbers, code_angles, curves);
+    auto result = points_and_stuff_stable(code_numbers, code_angles, *rational_polygon, curves);
 
 
     return result;
@@ -475,9 +463,11 @@ boost::optional<Unstable> calculate_unstable(const CodeSequence& code_sequence, 
     const auto code_angles_eta = falgo::transform(code_angles, xyz_to_xyeta);
     const auto code_angles_pi = falgo::transform(code_angles, xyz_to_xypi);
 
-    // Note: it is possible that we could calculate the bounding polygon first to
-    // check if it is empty. This way, we can return an empty optional without
-    // finding the unfolding
+    // arthur 06/08/2026 [early bounding rejection: avoid heavy Unfolding generation if mathematically empty]
+    const auto rational_line_segment = calculate_bounding_line_segment(code_numbers, code_angles, constraint);
+    if (!rational_line_segment) {
+        return boost::none;
+    }
 
     const Unfolding unfold{code_numbers, code_angles};
 
@@ -503,7 +493,7 @@ boost::optional<Unstable> calculate_unstable(const CodeSequence& code_sequence, 
     } else {
         throw std::runtime_error("stable code type in unstable case");
     }
-    auto result = points_and_stuff_unstable(code_numbers, code_angles, constraint, curves);
+    auto result = points_and_stuff_unstable(code_numbers, code_angles, *rational_line_segment, constraint, curves);
     return result;
 }
 
