@@ -53,7 +53,7 @@ copy /y "C:\msys64\ucrt64\bin\libstdc++-6.dll" "%INPUT_DIR%\backend\shared\" 2>n
 copy /y "C:\msys64\ucrt64\bin\libgcc_s_seh-1.dll" "%INPUT_DIR%\backend\shared\" 2>nul
 
 rem === Step 6: Package with jpackage ===
-rem abdul 31/07/2026 [give the installed Windows launcher the same documented JVM memory defaults as Gradle run]
+rem arthur 06/08/2026 [give the installed Windows launcher the same documented JVM memory defaults as Gradle run]
 rem Required for JNA in Java 22+
 echo [INFO] Running jpackage...
 "%JAVA_HOME%\bin\jpackage" ^
@@ -65,7 +65,15 @@ echo [INFO] Running jpackage...
   --runtime-image "%RUNTIME_IMAGE%" ^
   --dest "%DIST_DIR%" ^
   --win-console ^
-  --java-options "-server -Xss2m -Xms2g -Xmx6g -XX:MaxDirectMemorySize=2g -XX:+UnlockDiagnosticVMOptions -Djna.library.path=$APPDIR\backend\shared --enable-native-access=ALL-UNNAMED,javafx.graphics --add-modules=javafx.controls,javafx.fxml,java.sql" ^
+  --java-options "-server" ^
+  --java-options "-Xss2m" ^
+  --java-options "-Xms2g" ^
+  --java-options "-Xmx6g" ^
+  --java-options "-XX:MaxDirectMemorySize=2g" ^
+  --java-options "-XX:+UnlockDiagnosticVMOptions" ^
+  --java-options "-Djna.library.path=$APPDIR\backend\shared" ^
+  --java-options "--enable-native-access=ALL-UNNAMED,javafx.graphics" ^
+  --java-options "--add-modules=javafx.controls,javafx.fxml,java.sql" ^
   --app-version 2.1
 
 echo [SUCCESS] Installer created at %DIST_DIR%

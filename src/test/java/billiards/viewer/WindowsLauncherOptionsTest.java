@@ -8,7 +8,7 @@ import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-// abdul 31/07/2026 [keep the packaged launcher aligned with documented Gradle JVM memory defaults]
+// arthur 06/08/2026 [keep the packaged launcher aligned with documented Gradle JVM memory defaults]
 final class WindowsLauncherOptionsTest {
     @Test
     void packageScriptContainsRequiredMemoryOptions() throws IOException {

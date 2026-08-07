@@ -86,9 +86,9 @@ dependencies {
 test {
     useJUnitPlatform()
 
-    // abdul 27/07/2026 [run JNA regression tests against the backend built from the same source tree so ABI drift fails in CI]
+    // arthur 06/08/2026 [run JNA regression tests against the backend built from the same source tree so ABI drift fails in CI]
     dependsOn 'backendSharedLibrary'
-    // abdul 31/07/2026 [allow verification against a fresh side-by-side DLL when the installed backend is locked by a running application]
+    // arthur 06/08/2026 [allow verification against a fresh side-by-side DLL when the installed backend is locked by a running application]
     def backendTestDir = project.hasProperty('backendTestDir') ? file(project.property('backendTestDir')) : file("$projectDir/build/libs/backend/shared")
     systemProperty 'jna.library.path', backendTestDir.absolutePath
     if (isWindows) {

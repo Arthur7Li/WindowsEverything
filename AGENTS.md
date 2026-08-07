@@ -1,16 +1,16 @@
-# Abdul Windows Agent Notes
+# Arthur Windows Agent Notes
 
-This repo is the active Abdul Windows source. Future agents working here must treat
+This repo is the Abdul Windows source actively worked on by Arthur. Future agents working here must treat
 `docs/codex-project-study/bug-register.csv` as the live issue tracker and must keep
 release-facing changes documented in code and in `docs/release/`.
 
 Working rules:
 
-- Preserve Abdul Windows behavior unless the user explicitly asks to port a NiShan Linux or Suryansh Mac change.
+- Preserve Arthur Windows behavior unless the user explicitly asks to port a NiShan Linux or Suryansh Mac change.
 - Do not port the Linux database relocation without a separate migration plan.
 - Keep user runtime memory defaults in `build.gradle`: `-Xms2g`, `-Xmx6g`, and `MaxDirectMemorySize=2g`.
 - Add short comments for non-obvious code changes, especially Java/native ownership, threading, cancellation, memory, and math behavior.
-- Effective 19/07/2026, every future hand-written code change must have a nearby comment in the file's syntax using the exact form `abdul dd/mm/yyyy [what changed and why]`. Use one comment per cohesive changed block, add the comment in every affected code file, preserve older Abdul comments, and add a new dated comment when later behavior changes the same block. Tests, build logic, and hand-written scripts count as code; generated files and formatting-only edits are exempt. Record deletions, which cannot carry a nearby comment, in the live change register and release report.
+- Effective 19/07/2026, every future hand-written code change must have a nearby comment in the file's syntax using the exact form `arthur dd/mm/yyyy [what changed and why]`. Use one comment per cohesive changed block, add the comment in every affected code file, preserve older comments if able, and add a new dated comment when later behavior changes the same block. Tests, build logic, and hand-written scripts count as code; generated files and formatting-only edits are exempt. Record deletions, which cannot carry a nearby comment, in the live change register and release report.
 - Effective 31/07/2026, every future touched C++ function, type, and interface must have Doxygen documentation covering purpose, parameters, return value, ownership, failure behavior, invariants, and relevant mathematical meaning. Also comment every touched executable or declarative C++ line with its intent; braces, blank lines, and purely structural syntax are exempt. Prefer useful explanation over restating syntax, and retain the dated Abdul block annotation above.
 - After source edits, run at least `.\gradlew.bat --no-daemon compileJava backendSharedLibrary` on Windows.
 - For native changes, also run `.\gradlew.bat --no-daemon testBackend` when feasible.

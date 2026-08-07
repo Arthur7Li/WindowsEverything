@@ -7,6 +7,10 @@
 #include "database/serialize.hpp"
 #include "shooting_vectors.hpp"
 #include "unfolding.hpp"
+#include <boost/asio/thread_pool.hpp>
+#include <boost/asio/post.hpp>
+#include <thread>
+#include <mutex>
 
 // Should we sort the all vertices in a particular order when we put them in the database?
 
@@ -481,12 +485,24 @@ static std::pair<SinglePair, StableInfo> get_single_info(const CodeSequence& cod
     return {SinglePair{single_pair}, StableInfo{info.second}};
 }
 
-std::vector<std::pair<SinglePair, StableInfo>> get_single_infos(const std::set<CodeSequence>& code_seqs, const bool mrr, sqlite::Database& db) {
+// arthur 06/08/2026 [Converted to thread pool to concurrently fetch single code database records without blocking]
+std::vector<std::pair<SinglePair, StableInfo>> get_single_infos(const std::set<CodeSequence>& code_seqs, const bool mrr, sqlite::ConnectionPool& pool) {
 
-    std::vector<std::pair<SinglePair, StableInfo>> stable_infos{};
+    std::vector<std::pair<SinglePair, StableInfo>> stable_infos;
+    stable_infos.reserve(code_seqs.size());
+    std::mutex mtx;
+
+    boost::asio::thread_pool t_pool{std::thread::hardware_concurrency()};
+
     for (const auto& code_seq : code_seqs) {
-        stable_infos.push_back(get_single_info(code_seq, mrr, db));
+        boost::asio::post(t_pool, [&, code_seq] {
+            sqlite::PooledConnection conn{pool};
+            auto info = get_single_info(code_seq, mrr, conn.db);
+            std::lock_guard<std::mutex> lock(mtx);
+            stable_infos.push_back(std::move(info));
+        });
     }
+    t_pool.join();
 
     std::map<SinglePair, Integer> costs{};
     for (const auto& p : stable_infos) {
@@ -563,68 +579,132 @@ static bool get_triple_info_half_duplicate_stables(const HalfTriple& triple, con
 }
 
 
-std::vector<std::pair<TriplePair, TripleInfo>> get_triple_infos(const std::set<Triple>& triples, const bool mrr, sqlite::Database& db) {
+// arthur 06/08/2026 [Converted to thread pool to concurrently fetch triple database records without blocking]
+std::vector<std::pair<TriplePair, TripleInfo>> get_triple_infos(const std::set<Triple>& triples, const bool mrr, sqlite::ConnectionPool& pool) {
 
-    std::vector<std::pair<TriplePair, TripleInfo>> triple_infos{};
+    std::vector<std::pair<TriplePair, TripleInfo>> triple_infos;
+    triple_infos.reserve(triples.size());
+    std::mutex mtx;
+
+    boost::asio::thread_pool t_pool{std::thread::hardware_concurrency()};
 
     for (const auto& triple : triples) {
-        triple_infos.push_back(get_triple_info(triple, mrr, db));
+        boost::asio::post(t_pool, [&, triple] {
+            sqlite::PooledConnection conn{pool};
+            auto info = get_triple_info(triple, mrr, conn.db);
+            std::lock_guard<std::mutex> lock(mtx);
+            triple_infos.push_back(std::move(info));
+        });
     }
+    t_pool.join();
 
     // TODO should we sort the triples by cost too?
 
     return triple_infos;
 }
 
-std::pair<bool, bool> get_triple_infos_duplicate_stables(const std::set<Triple>& triples, const bool mrr, sqlite::Database& db, const bool show) {
+// arthur 06/08/2026 [Converted to thread pool to concurrently check duplicate triples stability without blocking]
+std::pair<bool, bool> get_triple_infos_duplicate_stables(const std::set<Triple>& triples, const bool mrr, sqlite::ConnectionPool& pool, const bool show) {
     std::pair<bool, bool> Q{};
-    for (const auto& triple : triples) {
-        Q = get_triple_info_duplicate_stables(triple, mrr, db, show);
+    std::vector<Triple> triples_vec(triples.begin(), triples.end());
+    std::vector<std::pair<bool, bool>> results(triples_vec.size());
+    
+    boost::asio::thread_pool t_pool{std::thread::hardware_concurrency()};
+    for (size_t i = 0; i < triples_vec.size(); ++i) {
+        boost::asio::post(t_pool, [&, i] {
+            sqlite::PooledConnection conn{pool};
+            results[i] = get_triple_info_duplicate_stables(triples_vec[i], mrr, conn.db, show);
+        });
     }
-
+    t_pool.join();
+    
+    if (!results.empty()) {
+        Q = results.back();
+    }
     return Q;
 }
 
-bool get_triple_infos_half_duplicate_stables(const std::set<HalfTriple>& half_triples, const bool mrr, sqlite::Database& db) {
+// arthur 06/08/2026 [Converted to thread pool to concurrently check duplicate half triples stability without blocking]
+bool get_triple_infos_half_duplicate_stables(const std::set<HalfTriple>& half_triples, const bool mrr, sqlite::ConnectionPool& pool) {
     bool temp = false;
-    for (const auto& half_triple : half_triples) {
-        temp = get_triple_info_half_duplicate_stables(half_triple, mrr, db);
+    std::vector<HalfTriple> triples_vec(half_triples.begin(), half_triples.end());
+    std::vector<bool> results(triples_vec.size());
+
+    boost::asio::thread_pool t_pool{std::thread::hardware_concurrency()};
+    for (size_t i = 0; i < triples_vec.size(); ++i) {
+        boost::asio::post(t_pool, [&, i] {
+            sqlite::PooledConnection conn{pool};
+            results[i] = get_triple_info_half_duplicate_stables(triples_vec[i], mrr, conn.db);
+        });
+    }
+    t_pool.join();
+
+    if (!results.empty()) {
+        temp = results.back();
     }
     return temp;
 }
 
 // Only difference is no sorting and return value
-std::map<SinglePair, StableInfo> get_single_infos_map(const std::vector<CodePair>& code_seqs, const bool mrr, sqlite::Database& db) {
+// arthur 06/08/2026 [Converted to thread pool to concurrently fetch single infos map without blocking]
+std::map<SinglePair, StableInfo> get_single_infos_map(const std::vector<CodePair>& code_seqs, const bool mrr, sqlite::ConnectionPool& pool) {
+
+    std::vector<std::pair<SinglePair, StableInfo>> results;
+    results.reserve(code_seqs.size());
+    std::mutex mtx;
+
+    boost::asio::thread_pool t_pool{std::thread::hardware_concurrency()};
+    for (const auto& code_pair : code_seqs) {
+        boost::asio::post(t_pool, [&, code_pair] {
+            sqlite::PooledConnection conn{pool};
+            const auto info = get_single_info(code_pair.sequence, mrr, conn.db);
+            
+            if (!(code_pair.angles == info.first.stable.get().angles)) {
+                throw std::runtime_error("stable angles do not match");
+            }
+            std::lock_guard<std::mutex> lock(mtx);
+            results.push_back(std::move(info));
+        });
+    }
+    t_pool.join();
 
     std::map<SinglePair, StableInfo> stable_infos{};
-    for (const auto& code_pair : code_seqs) {
-        const auto info = get_single_info(code_pair.sequence, mrr, db);
-
-        if (!(code_pair.angles == info.first.stable.get().angles)) {
-            throw std::runtime_error("stable angles do not match");
-        }
-
+    for (const auto& info : results) {
         stable_infos.insert(info);
     }
 
     return stable_infos;
 }
 
-std::map<TriplePair, TripleInfo> get_triple_infos_map(const std::vector<TriplePair>& triples, const bool mrr, sqlite::Database& db) {
+// arthur 06/08/2026 [Converted to thread pool to concurrently fetch triple infos map without blocking]
+std::map<TriplePair, TripleInfo> get_triple_infos_map(const std::vector<TriplePair>& triples, const bool mrr, sqlite::ConnectionPool& pool) {
+
+    std::vector<std::pair<TriplePair, TripleInfo>> results;
+    results.reserve(triples.size());
+    std::mutex mtx;
+
+    boost::asio::thread_pool t_pool{std::thread::hardware_concurrency()};
+    for (const auto& triple_pair : triples) {
+        boost::asio::post(t_pool, [&, triple_pair] {
+            sqlite::PooledConnection conn{pool};
+            const Triple triple{triple_pair.stable_neg.get().sequence,
+                                triple_pair.unstable.get().sequence,
+                                triple_pair.stable_pos.get().sequence};
+
+            const auto info = get_triple_info(triple, mrr, conn.db);
+
+            if (!(triple_pair == info.first)) {
+                throw std::runtime_error("triple pairs do not match");
+            }
+            
+            std::lock_guard<std::mutex> lock(mtx);
+            results.push_back(std::move(info));
+        });
+    }
+    t_pool.join();
 
     std::map<TriplePair, TripleInfo> triple_infos{};
-    for (const auto& triple_pair : triples) {
-
-        const Triple triple{triple_pair.stable_neg.get().sequence,
-                            triple_pair.unstable.get().sequence,
-                            triple_pair.stable_pos.get().sequence};
-
-        const auto info = get_triple_info(triple, mrr, db);
-
-        if (!(triple_pair == info.first)) {
-            throw std::runtime_error("triple pairs do not match");
-        }
-
+    for (const auto& info : results) {
         triple_infos.insert(info);
     }
 

@@ -510,8 +510,9 @@ std::string getEmpties(const std::string& polygon_str, const std::string& single
     const auto singles = parse_singles(singles_str); // singles to check holes with
     const auto triples = parse_triples(triples_str); // triples to check holes with
 
-    const auto single_infos = get_single_infos(singles, mrr, conn.db);
-    const auto triple_infos = get_triple_infos(triples, mrr, conn.db);
+    // arthur 06/08/2026 [Pass pool instead of db for thread-safe concurrent database lookups]
+    const auto single_infos = get_single_infos(singles, mrr, pool);
+    const auto triple_infos = get_triple_infos(triples, mrr, pool);
 
     const auto prec = digits_to_bits(digits);
 
@@ -798,8 +799,9 @@ std::string check_cover(const std::string& polygon_str, const std::string& singl
     const auto singles = parse_singles(singles_str); // singles to check holes with
     const auto triples = parse_triples(triples_str); // triples to check holes with
 
-    const auto single_infos = get_single_infos(singles, mrr, conn.db);
-    const auto triple_infos = get_triple_infos(triples, mrr, conn.db);
+    // arthur 06/08/2026 [Pass pool instead of db for thread-safe concurrent database lookups]
+    const auto single_infos = get_single_infos(singles, mrr, pool);
+    const auto triple_infos = get_triple_infos(triples, mrr, pool);
 
     return cover_polygon(cover, square, polygon, single_infos, triple_infos, digits, max_depth, empty, mrr);
 }
@@ -1092,8 +1094,9 @@ std::string check_small_cover(const std::string& polygon_str, const std::string&
     const auto singles = parse_singles(singles_str); // singles to check holes with
     const auto triples = parse_triples(triples_str); // triples to check holes with
 
-    const auto single_infos = get_single_infos(singles, mrr, conn.db);
-    const auto triple_infos = get_triple_infos(triples, mrr, conn.db);
+    // arthur 06/08/2026 [Pass pool instead of db for thread-safe concurrent database lookups]
+    const auto single_infos = get_single_infos(singles, mrr, pool);
+    const auto triple_infos = get_triple_infos(triples, mrr, pool);
 
     return cover_small_polygon(cover, square, polygon, single_infos, triple_infos, digits, max_depth, empty, mrr, printInfo);
 }
@@ -1105,7 +1108,7 @@ int32_t check_cover_duplicate_stables(const std::string& polygon_str, const std:
 
     const auto triples = parse_triples(triples_str); //triples to check holes with
 
-    std::pair<bool, bool> Q = get_triple_infos_duplicate_stables(triples, mrr, conn.db, show);
+    std::pair<bool, bool> Q = get_triple_infos_duplicate_stables(triples, mrr, pool, show);
 
     if(Q.first && Q.second){
         return 2;
@@ -1289,7 +1292,7 @@ bool check_cover_half_duplicate_stables(const std::string& polygon_str, const st
 
     const auto triples = parse_triples_half(triples_str); // triples to check holes with
 
-    return get_triple_infos_half_duplicate_stables(triples, mrr, conn.db);
+    return get_triple_infos_half_duplicate_stables(triples, mrr, pool);
 }
 
 bool check_cover_all(const std::string& mrr_dir, sqlite::ConnectionPool& pool, const uint32_t extra_depth) {
@@ -1315,8 +1318,8 @@ bool check_cover_all(const std::string& mrr_dir, sqlite::ConnectionPool& pool, c
         std::vector<CodePair> new_stables{set_stables.begin(), set_stables.end()};
         falgo::reverse(new_stables);
 
-        single_infos = get_single_infos_map(new_stables, false, conn.db);
-        triple_infos = get_triple_infos_map(mrr_triples, false, conn.db);
+        single_infos = get_single_infos_map(new_stables, false, pool);
+        triple_infos = get_triple_infos_map(mrr_triples, false, pool);
     };
 
     const std::string all_dir{"cover"};
